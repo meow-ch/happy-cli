@@ -272,17 +272,53 @@ export const CreateSessionResponseSchema = z.object({
 
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>
 
-export const UserMessageSchema = z.object({
-  role: z.literal('user'),
-  content: z.object({
+// Image content schema for user messages
+const ImageContentSchema = z.object({
+  type: z.literal('image'),
+  source: z.object({
+    type: z.literal('base64'),
+    media_type: z.enum(['image/jpeg', 'image/png', 'image/gif', 'image/webp']),
+    data: z.string() // Base64 encoded image data
+  })
+})
+
+// User message content can be text-only or multipart (text + images)
+const UserContentSchema = z.union([
+  z.object({
     type: z.literal('text'),
     text: z.string()
   }),
+  z.object({
+    type: z.literal('multipart'),
+    parts: z.array(z.union([
+      z.object({ type: z.literal('text'), text: z.string() }),
+      ImageContentSchema
+    ]))
+  })
+])
+
+export const UserMessageSchema = z.object({
+  role: z.literal('user'),
+  content: UserContentSchema,
   localKey: z.string().optional(), // Mobile messages include this
   meta: MessageMetaSchema.optional()
 })
 
 export type UserMessage = z.infer<typeof UserMessageSchema>
+
+/**
+ * Extract text from user message content (handles both text and multipart)
+ */
+export function getUserMessageText(content: z.infer<typeof UserContentSchema>): string {
+  if (content.type === 'text') {
+    return content.text;
+  }
+  // Multipart: concatenate all text parts
+  const textParts = content.parts
+    .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+    .map(p => p.text);
+  return textParts.join('\n');
+}
 
 export const AgentMessageSchema = z.object({
   role: z.literal('agent'),

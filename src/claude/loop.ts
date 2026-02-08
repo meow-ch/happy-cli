@@ -12,6 +12,13 @@ import type { JsRuntime } from "./runClaude"
 export type { PermissionMode } from "@/api/types"
 import type { PermissionMode } from "@/api/types"
 
+// Image content for multipart messages
+export interface ImageContent {
+    type: 'base64';
+    media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+    data: string;
+}
+
 export interface EnhancedMode {
     permissionMode: PermissionMode;
     model?: string;
@@ -20,6 +27,8 @@ export interface EnhancedMode {
     appendSystemPrompt?: string;
     allowedTools?: string[];
     disallowedTools?: string[];
+    // Images attached to this message
+    images?: ImageContent[];
 }
 
 interface LoopOptions {

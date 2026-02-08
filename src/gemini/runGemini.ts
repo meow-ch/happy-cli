@@ -260,7 +260,13 @@ export async function runGemini(opts: {
 
     // Build the full prompt with appendSystemPrompt if provided
     // Only include system prompt for the first message to avoid forcing tool usage on every message
-    const originalUserMessage = message.content.text;
+    // Get text from message content (handles both text and multipart)
+    const originalUserMessage = message.content.type === 'text'
+      ? message.content.text
+      : message.content.parts
+          .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+          .map(p => p.text)
+          .join('\n');
     let fullPrompt = originalUserMessage;
     if (isFirstMessage && message.meta?.appendSystemPrompt) {
       // Prepend system prompt to user message only for first message

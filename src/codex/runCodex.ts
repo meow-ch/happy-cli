@@ -182,11 +182,19 @@ export async function runCodex(opts: {
             logger.debug(`[Codex] User message received with no model override, using current: ${currentModel || 'default'}`);
         }
 
+        // Get text from message content (handles both text and multipart)
+        const messageText = message.content.type === 'text'
+            ? message.content.text
+            : message.content.parts
+                .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+                .map(p => p.text)
+                .join('\n');
+
         const enhancedMode: EnhancedMode = {
             permissionMode: messagePermissionMode || 'default',
             model: messageModel,
         };
-        messageQueue.push(message.content.text, enhancedMode);
+        messageQueue.push(messageText, enhancedMode);
     });
     let thinking = false;
     session.keepAlive(thinking, 'remote');

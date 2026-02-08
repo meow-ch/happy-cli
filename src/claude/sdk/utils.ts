@@ -194,7 +194,9 @@ export async function streamToStdin(
 ): Promise<void> {
     for await (const message of stream) {
         if (abort?.aborted) break
-        stdin.write(JSON.stringify(message) + '\n')
+        const jsonStr = JSON.stringify(message)
+        logger.debug(`[streamToStdin] Sending message (${jsonStr.length} bytes): ${jsonStr.substring(0, 500)}${jsonStr.length > 500 ? '...' : ''}`)
+        stdin.write(jsonStr + '\n')
     }
     stdin.end()
 }

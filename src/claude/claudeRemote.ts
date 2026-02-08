@@ -1,4 +1,4 @@
-import { EnhancedMode } from "./loop";
+import { EnhancedMode, ImageContent } from "./loop";
 import { query, type QueryOptions, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage } from '@/claude/sdk'
 import { mapToClaudeMode } from "./utils/permissionMode";
 import { claudeCheckSession } from "./utils/claudeCheckSession";
@@ -12,6 +12,39 @@ import { awaitFileExist } from "@/modules/watcher/awaitFileExist";
 import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import type { JsRuntime } from "./runClaude";
+
+/**
+ * Build message content for Claude SDK - either string or multipart array with images
+ */
+function buildMessageContent(text: string, images?: ImageContent[]): string | Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }> {
+    if (!images || images.length === 0) {
+        return text;
+    }
+
+    // Build multipart content array - images first, then text (Claude's recommended order)
+    const content: Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }> = [];
+
+    // Add images
+    for (const img of images) {
+        content.push({
+            type: 'image',
+            source: {
+                type: 'base64',
+                media_type: img.media_type,
+                data: img.data
+            }
+        });
+    }
+
+    // Add text - if no text provided, use a default prompt for image-only messages
+    const messageText = text.trim() || 'What do you see in this image?';
+    content.push({
+        type: 'text',
+        text: messageText
+    });
+
+    return content;
+}
 
 export async function claudeRemote(opts: {
 
@@ -147,11 +180,16 @@ export async function claudeRemote(opts: {
 
     // Push initial message
     let messages = new PushableAsyncIterable<SDKUserMessage>();
+    const initialContent = buildMessageContent(initial.message, mode.images);
+    logger.debug(`[claudeRemote] Initial message content type: ${typeof initialContent === 'string' ? 'string' : 'array'}`);
+    if (Array.isArray(initialContent)) {
+        logger.debug(`[claudeRemote] Content array length: ${initialContent.length}, types: ${initialContent.map(c => c.type).join(', ')}`);
+    }
     messages.push({
         type: 'user',
         message: {
             role: 'user',
-            content: initial.message,
+            content: initialContent,
         },
     });
 
@@ -213,7 +251,7 @@ export async function claudeRemote(opts: {
                     return;
                 }
                 mode = next.mode;
-                messages.push({ type: 'user', message: { role: 'user', content: next.message } });
+                messages.push({ type: 'user', message: { role: 'user', content: buildMessageContent(next.message, next.mode.images) } });
             }
 
             // Handle tool result

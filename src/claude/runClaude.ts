@@ -4,10 +4,10 @@ import { randomUUID } from 'node:crypto';
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
 import { loop } from '@/claude/loop';
-import { AgentState, Metadata } from '@/api/types';
+import { AgentState, Metadata, getUserMessageText } from '@/api/types';
 import packageJson from '../../package.json';
 import { Credentials, readSettings } from '@/persistence';
-import { EnhancedMode, PermissionMode } from './loop';
+import { EnhancedMode, ImageContent, PermissionMode } from './loop';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
 import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
@@ -248,6 +248,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
     let currentDisallowedTools: string[] | undefined = undefined; // Track current disallowed tools
     session.onUserMessage((message) => {
+        logger.debug(`[runClaude] Received user message. Content type: ${message.content?.type}, role: ${message.role}`);
 
         // Resolve permission mode from meta - pass through as-is, mapping happens at SDK boundary
         let messagePermissionMode: PermissionMode | undefined = currentPermissionMode;
@@ -319,8 +320,11 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] User message received with no disallowed tools override, using current: ${currentDisallowedTools ? currentDisallowedTools.join(', ') : 'none'}`);
         }
 
+        // Get text from message content (handles both text and multipart)
+        const rawMessageText = getUserMessageText(message.content);
+
         // Check for special commands before processing
-        const specialCommand = parseSpecialCommand(message.content.text);
+        const specialCommand = parseSpecialCommand(rawMessageText);
 
         if (specialCommand.type === 'compact') {
             logger.debug('[start] Detected /compact command');
@@ -333,7 +337,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 allowedTools: messageAllowedTools,
                 disallowedTools: messageDisallowedTools
             };
-            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || message.content.text, enhancedMode);
+            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || rawMessageText, enhancedMode);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
             return;
         }
@@ -349,12 +353,47 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 allowedTools: messageAllowedTools,
                 disallowedTools: messageDisallowedTools
             };
-            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || message.content.text, enhancedMode);
+            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || rawMessageText, enhancedMode);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
             return;
         }
 
-        // Push with resolved permission mode, model, system prompts, and tools
+        // Extract text and images from message content
+        let messageText = '';
+        let messageImages: ImageContent[] | undefined = undefined;
+
+        if (message.content.type === 'text') {
+            // Simple text message
+            messageText = message.content.text;
+        } else if (message.content.type === 'multipart') {
+            // Multipart message with text and/or images
+            const parts = message.content.parts as Array<
+                | { type: 'text'; text: string }
+                | { type: 'image'; source: { type: 'base64'; media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'; data: string } }
+            >;
+
+            const textParts: string[] = [];
+            const images: ImageContent[] = [];
+
+            for (const part of parts) {
+                if (part.type === 'text') {
+                    textParts.push(part.text);
+                } else if (part.type === 'image' && part.source) {
+                    images.push({
+                        type: 'base64',
+                        media_type: part.source.media_type,
+                        data: part.source.data
+                    });
+                }
+            }
+
+            messageText = textParts.join('\n');
+            if (images.length > 0) {
+                messageImages = images;
+            }
+        }
+
+        // Push with resolved permission mode, model, system prompts, tools, and images
         const enhancedMode: EnhancedMode = {
             permissionMode: messagePermissionMode || 'default',
             model: messageModel,
@@ -362,9 +401,17 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             customSystemPrompt: messageCustomSystemPrompt,
             appendSystemPrompt: messageAppendSystemPrompt,
             allowedTools: messageAllowedTools,
-            disallowedTools: messageDisallowedTools
+            disallowedTools: messageDisallowedTools,
+            images: messageImages
         };
-        messageQueue.push(message.content.text, enhancedMode);
+
+        // Log image details for debugging
+        if (messageImages && messageImages.length > 0) {
+            logger.debug(`[runClaude] Message has ${messageImages.length} images. First image base64 length: ${messageImages[0].data.length} chars`);
+        }
+        logger.debug(`[runClaude] Pushing message to queue. Text length: ${messageText.length}, Has images: ${!!messageImages}`);
+
+        messageQueue.push(messageText, enhancedMode);
         logger.debugLargeJson('User message pushed to queue:', message)
     });
 

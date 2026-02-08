@@ -132,12 +132,14 @@ export class ApiSessionClient extends EventEmitter {
                 if (data.body.t === 'new-message' && data.body.message.content.t === 'encrypted') {
                     const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
 
+                    console.log('\n\n🔍 [DEBUG] DECRYPTED MESSAGE FROM APP:\n', JSON.stringify(body, null, 2), '\n\n');
                     logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body)
 
                     // Try to parse as user message first
                     const userResult = UserMessageSchema.safeParse(body);
                     if (userResult.success) {
                         // Server already filtered to only our session
+                        logger.debug(`[SOCKET] Parsed user message successfully. Content type: ${userResult.data.content?.type}`);
                         if (this.pendingMessageCallback) {
                             this.pendingMessageCallback(userResult.data);
                         } else {
@@ -145,6 +147,8 @@ export class ApiSessionClient extends EventEmitter {
                         }
                     } else {
                         // If not a user message, it might be a permission response or other message type
+                        logger.debug(`[SOCKET] Failed to parse as user message: ${JSON.stringify(userResult.error.errors)}`);
+                        logger.debugLargeJson('[SOCKET] Message body that failed parsing:', body);
                         this.emit('message', body);
                     }
                 } else if (data.body.t === 'update-session') {

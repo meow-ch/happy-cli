@@ -154,8 +154,9 @@ HAPPY_SERVER_URL=http://localhost:3005 ./bin/happy.mjs daemon start
 ```
 
 ## Daemon Logs
-- Daemon logs are stored in `~/.happy-dev/logs/` (or `$HAPPY_HOME_DIR/logs/`)
-- Named with format: `YYYY-MM-DD-HH-MM-SS-daemon.log`
+- Daemon logs are stored in `~/.happy/logs/` (or `$HAPPY_HOME_DIR/logs/`)
+- Named with format: `YYYY-MM-DD-HH-MM-SS-pid-XXXXX-daemon.log`
+- See [DEBUG_LOGS.md](./DEBUG_LOGS.md) for detailed debugging instructions
 
 # Session Forking `claude` and sdk behavior
 

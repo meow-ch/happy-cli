@@ -359,18 +359,23 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         }
 
         // Extract text and images from message content
+        logger.debug(`[runClaude] 🖼️ Processing message, content type: ${message.content.type}`);
         let messageText = '';
         let messageImages: ImageContent[] | undefined = undefined;
 
         if (message.content.type === 'text') {
             // Simple text message
             messageText = message.content.text;
+            logger.debug(`[runClaude] 🖼️ Text-only message, length: ${messageText.length}`);
         } else if (message.content.type === 'multipart') {
             // Multipart message with text and/or images
+            logger.debug(`[runClaude] 🖼️ MULTIPART message detected!`);
             const parts = message.content.parts as Array<
                 | { type: 'text'; text: string }
                 | { type: 'image'; source: { type: 'base64'; media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'; data: string } }
             >;
+
+            logger.debug(`[runClaude] 🖼️ Parts count: ${parts.length}, types: ${parts.map(p => p.type).join(', ')}`);
 
             const textParts: string[] = [];
             const images: ImageContent[] = [];
@@ -378,18 +383,21 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             for (const part of parts) {
                 if (part.type === 'text') {
                     textParts.push(part.text);
+                    logger.debug(`[runClaude] 🖼️ Found text part, length: ${part.text.length}`);
                 } else if (part.type === 'image' && part.source) {
                     images.push({
                         type: 'base64',
                         media_type: part.source.media_type,
                         data: part.source.data
                     });
+                    logger.debug(`[runClaude] 🖼️ Found image part, media_type: ${part.source.media_type}, base64 length: ${part.source.data.length}`);
                 }
             }
 
             messageText = textParts.join('\n');
             if (images.length > 0) {
                 messageImages = images;
+                logger.debug(`[runClaude] 🖼️ Extracted ${images.length} images to messageImages`);
             }
         }
 

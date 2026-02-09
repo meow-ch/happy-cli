@@ -132,14 +132,22 @@ export class ApiSessionClient extends EventEmitter {
                 if (data.body.t === 'new-message' && data.body.message.content.t === 'encrypted') {
                     const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
 
-                    console.log('\n\n🔍 [DEBUG] DECRYPTED MESSAGE FROM APP:\n', JSON.stringify(body, null, 2), '\n\n');
+                    logger.debug(`[SOCKET] 🖼️ DECRYPTED MESSAGE - Content type: ${body?.content?.type}`);
+                    if (body?.content?.type === 'multipart') {
+                        const parts = body.content.parts || [];
+                        logger.debug(`[SOCKET] 🖼️ MULTIPART MESSAGE - ${parts.length} parts: ${parts.map((p: any) => p.type).join(', ')}`);
+                        const imageParts = parts.filter((p: any) => p.type === 'image');
+                        if (imageParts.length > 0) {
+                            logger.debug(`[SOCKET] 🖼️ IMAGE FOUND - ${imageParts.length} images, first base64 length: ${imageParts[0]?.source?.data?.length || 0}`);
+                        }
+                    }
                     logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body)
 
                     // Try to parse as user message first
                     const userResult = UserMessageSchema.safeParse(body);
                     if (userResult.success) {
                         // Server already filtered to only our session
-                        logger.debug(`[SOCKET] Parsed user message successfully. Content type: ${userResult.data.content?.type}`);
+                        logger.debug(`[SOCKET] ✅ Parsed user message successfully. Content type: ${userResult.data.content?.type}`);
                         if (this.pendingMessageCallback) {
                             this.pendingMessageCallback(userResult.data);
                         } else {

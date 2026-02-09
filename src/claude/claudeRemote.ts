@@ -17,15 +17,21 @@ import type { JsRuntime } from "./runClaude";
  * Build message content for Claude SDK - either string or multipart array with images
  */
 function buildMessageContent(text: string, images?: ImageContent[]): string | Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }> {
+    logger.debug(`[claudeRemote] 🖼️ buildMessageContent called - text length: ${text.length}, images: ${images?.length || 0}`);
+
     if (!images || images.length === 0) {
+        logger.debug(`[claudeRemote] 🖼️ No images, returning text-only`);
         return text;
     }
+
+    logger.debug(`[claudeRemote] 🖼️ Building MULTIPART content with ${images.length} images`);
 
     // Build multipart content array - images first, then text (Claude's recommended order)
     const content: Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }> = [];
 
     // Add images
     for (const img of images) {
+        logger.debug(`[claudeRemote] 🖼️ Adding image: ${img.media_type}, base64 length: ${img.data.length}`);
         content.push({
             type: 'image',
             source: {
@@ -38,11 +44,13 @@ function buildMessageContent(text: string, images?: ImageContent[]): string | Ar
 
     // Add text - if no text provided, use a default prompt for image-only messages
     const messageText = text.trim() || 'What do you see in this image?';
+    logger.debug(`[claudeRemote] 🖼️ Adding text: "${messageText.substring(0, 50)}..."`);
     content.push({
         type: 'text',
         text: messageText
     });
 
+    logger.debug(`[claudeRemote] 🖼️ Built content array with ${content.length} parts`);
     return content;
 }
 

@@ -1,3 +1,30 @@
+# Boujot Fork
+
+This is the boujot fork of happy-coder.
+
+## Branch Structure
+
+- `main` - community updates from upstream happy-coder
+- `master` - boujot features + development (work here)
+- `boujot-rebranded` - npm publishing only (@boujot/cli)
+
+## Publishing to npm
+
+```bash
+git checkout boujot-rebranded
+git reset --hard master
+yarn rebrand
+git add bin/ src/ package.json
+git commit -m "Apply rebrand to @boujot/cli"
+yarn build
+npm publish --access public
+git checkout master
+```
+
+See `scripts/rebrand.ts` for full documentation.
+
+---
+
 # Happy
 
 Code on the go — control AI coding agents from your mobile device.

@@ -259,6 +259,7 @@ function main() {
         [/HAPPY_WEBAPP_URL/g, 'BOUJOT_WEBAPP_URL'],
         [/HAPPY_HOME_DIR/g, 'BOUJOT_HOME_DIR'],
         [/~\/\.happy\b/g, `~/${NEW_CONFIG_DIR}`],
+        [/happy gemini\b/g, `${NEW_BINARY} gemini`],
     ]);
 
     console.log('\n✅ Rebranding complete!\n');

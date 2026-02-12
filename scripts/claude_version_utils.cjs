@@ -445,6 +445,21 @@ function compareVersions(a, b) {
 }
 
 /**
+ * Get the update command for a given installation source
+ * @param {string} source - Installation source (npm, Bun, Homebrew, native installer, PATH)
+ * @returns {string} Update command
+ */
+function getUpdateCommandForSource(source) {
+    switch (source) {
+        case 'npm': return 'npm update -g @anthropic-ai/claude-code';
+        case 'Bun': return 'bun update -g @anthropic-ai/claude-code';
+        case 'Homebrew': return 'brew upgrade claude-code';
+        case 'native installer': return 'claude update';
+        default: return 'npm update -g @anthropic-ai/claude-code';
+    }
+}
+
+/**
  * Get the CLI path to use (global installation)
  * @returns {string} Path to cli.js
  * @throws {Error} If no global installation found
@@ -469,6 +484,19 @@ function getClaudeCliPath() {
     const version = getVersion(result.path);
     const versionStr = version ? ` v${version}` : '';
     console.error(`\x1b[90mUsing Claude Code${versionStr} from ${result.source}\x1b[0m`);
+
+    // Read cache (no network) to show update warning
+    try {
+        const happyHomeDir = process.env.HAPPY_HOME_DIR || path.join(os.homedir(), '.boujot');
+        const cacheFile = path.join(happyHomeDir, 'claude-version-cache.json');
+        if (fs.existsSync(cacheFile)) {
+            const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+            if (cache.latestVersion && version && compareVersions(version, cache.latestVersion) < 0) {
+                console.error(`\x1b[33m  Update available: ${version} \u2192 ${cache.latestVersion}\x1b[0m`);
+                console.error(`\x1b[33m  Run: ${getUpdateCommandForSource(result.source)}\x1b[0m`);
+            }
+        }
+    } catch (e) { /* no cache yet */ }
 
     return result.path;
 }
@@ -513,6 +541,7 @@ module.exports = {
     findNativeInstallerCliPath,
     getVersion,
     compareVersions,
+    getUpdateCommandForSource,
     getClaudeCliPath,
     runClaudeCli
 };

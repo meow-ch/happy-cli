@@ -22,6 +22,7 @@ import { join } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
+import { getGlobalClaudeVersion, checkClaudeVersion } from '@/utils/claudeVersionCheck';
 
 // Prepare initial metadata
 export const initialMachineMetadata: MachineMetadata = {
@@ -30,7 +31,8 @@ export const initialMachineMetadata: MachineMetadata = {
   happyCliVersion: packageJson.version,
   homeDir: os.homedir(),
   happyHomeDir: configuration.happyHomeDir,
-  happyLibDir: projectPath()
+  happyLibDir: projectPath(),
+  claudeCodeVersion: getGlobalClaudeVersion() ?? undefined,
 };
 
 // Get environment variables for a profile, filtered for agent compatibility
@@ -809,6 +811,22 @@ export async function startDaemon(): Promise<void> {
     };
 
     logger.debug('[DAEMON RUN] Daemon started successfully, waiting for shutdown request');
+
+    // Non-blocking Claude Code version check
+    checkClaudeVersion().then(result => {
+      if (result?.isOutdated) {
+        logger.info(`[DAEMON RUN] Claude Code outdated: ${result.installedVersion} -> ${result.latestVersion}`);
+        logger.info(`[DAEMON RUN] Update: ${result.updateCommand}`);
+        apiMachine.updateMachineMetadata(() => ({
+          ...initialMachineMetadata,
+          claudeCodeVersion: result.installedVersion,
+          claudeCodeLatestVersion: result.latestVersion,
+          claudeCodeUpdateCommand: result.updateCommand,
+        }));
+      } else if (result) {
+        logger.debug(`[DAEMON RUN] Claude Code ${result.installedVersion} is up to date`);
+      }
+    }).catch(() => {});
 
     // Wait for shutdown request
     const shutdownRequest = await resolvesWhenShutdownRequested;

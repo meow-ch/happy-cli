@@ -243,7 +243,13 @@ function main() {
         [`'happy directly`, `'${NEW_BINARY} directly`],
     ]);
 
-    // 8. Update README.md for npm
+    // 8. Update auth.ts QR code messages
+    console.log('\n📱 Updating QR code messages...');
+    replaceInFile(join(CLI_DIR, 'src/ui/auth.ts'), [
+        [/Happy mobile app/g, 'Boujot mobile app'],
+    ]);
+
+    // 9. Update README.md for npm
     console.log('\n📄 Updating README.md...');
     replaceInFile(join(CLI_DIR, 'README.md'), [
         [/# Happy\n/g, `# Boujot\n`],

@@ -260,6 +260,7 @@ function main() {
         [/HAPPY_HOME_DIR/g, 'BOUJOT_HOME_DIR'],
         [/~\/\.happy\b/g, `~/${NEW_CONFIG_DIR}`],
         [/happy gemini\b/g, `${NEW_BINARY} gemini`],
+        [/Free\. Open source\./g, 'Open source.'],
     ]);
 
     console.log('\n✅ Rebranding complete!\n');

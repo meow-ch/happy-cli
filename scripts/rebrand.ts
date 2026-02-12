@@ -252,9 +252,13 @@ function main() {
         [/# Happy\n/g, `# Boujot\n`],
         [/npm install -g happy-coder/g, `npm install -g ${NEW_PACKAGE_NAME}`],
         [/^happy$/gm, NEW_BINARY],
+        [/^happy /gm, `${NEW_BINARY} `],
         [/`happy`/g, `\`${NEW_BINARY}\``],
         [/`happy /g, `\`${NEW_BINARY} `],
         [/'happy'/g, `'${NEW_BINARY}'`],
+        [/HAPPY_WEBAPP_URL/g, 'BOUJOT_WEBAPP_URL'],
+        [/HAPPY_HOME_DIR/g, 'BOUJOT_HOME_DIR'],
+        [/~\/\.happy\b/g, `~/${NEW_CONFIG_DIR}`],
     ]);
 
     console.log('\n✅ Rebranding complete!\n');

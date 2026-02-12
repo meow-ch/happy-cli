@@ -280,3 +280,77 @@ export async function authAndSetupMachineIfNeeded(): Promise<{
 
     return { credentials, machineId: settings.machineId! };
 }
+
+/**
+ * Show QR code for linking another device to this already-authenticated CLI
+ * This allows multiple mobile/tablet devices to connect to the same CLI
+ */
+export async function showLinkQRCode(): Promise<void> {
+    // Generate ephemeral keypair for this link session
+    const secret = new Uint8Array(randomBytes(32));
+    const keypair = tweetnacl.box.keyPair.fromSecretKey(secret);
+
+    // Register the auth request with the server
+    try {
+        await axios.post(`${configuration.serverUrl}/v1/auth/request`, {
+            publicKey: encodeBase64(keypair.publicKey),
+            supportsV2: true
+        });
+    } catch (error) {
+        console.log('Failed to create link request, please try again later.');
+        return;
+    }
+
+    console.log('\nLink Another Device\n');
+    console.log('Scan this QR code with your Happy mobile app:\n');
+
+    const authUrl = 'happy://terminal?' + encodeBase64Url(keypair.publicKey);
+    displayQRCode(authUrl);
+
+    console.log('\nOr manually enter this URL:');
+    console.log(authUrl);
+    console.log('\n' + 'Press Ctrl+C to cancel\n');
+
+    // Wait for the device to link (or user to cancel)
+    await waitForLinkCompletion(keypair);
+}
+
+/**
+ * Wait for link to complete - we don't need the credentials since we're already authenticated
+ */
+async function waitForLinkCompletion(keypair: tweetnacl.BoxKeyPair): Promise<void> {
+    process.stdout.write('Waiting for device to link');
+    let dots = 0;
+
+    const handleInterrupt = () => {
+        console.log('\n\nLink cancelled.');
+        process.exit(0);
+    };
+
+    process.on('SIGINT', handleInterrupt);
+
+    try {
+        while (true) {
+            try {
+                const response = await axios.post(`${configuration.serverUrl}/v1/auth/request`, {
+                    publicKey: encodeBase64(keypair.publicKey),
+                    supportsV2: true
+                });
+                if (response.data.state === 'authorized') {
+                    console.log('\n\n✓ Device linked successfully!\n');
+                    return;
+                }
+            } catch (error) {
+                console.log('\n\nFailed to check link status. Please try again.');
+                return;
+            }
+
+            process.stdout.write('\rWaiting for device to link' + '.'.repeat((dots % 3) + 1) + '   ');
+            dots++;
+
+            await delay(1000);
+        }
+    } finally {
+        process.off('SIGINT', handleInterrupt);
+    }
+}

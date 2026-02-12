@@ -2,57 +2,51 @@
 /**
  * Rebrand script: Transforms happy-coder CLI to @boujot/cli
  *
- * Run this after pulling from upstream happy-coder to rebrand for publishing.
- *
  * Usage: yarn rebrand
  *
  * ## Git Branch Structure
  *
  * ```
- * main                  ← clean upstream (tracks happy-coder)
+ * main                  ← community updates (pull from happy-coder upstream)
  *     │
- *     └── boujot-rebrand     ← main + this script only
+ *     └── master        ← boujot features + this rebrand script
  *             │
- *             └── boujot-rebranded  ← fully rebranded, ready to publish
+ *             └── boujot-rebranded  ← publishing only (regenerated from master)
  * ```
  *
- * ## Initial Setup (already done)
+ * ## Development Workflow
  *
- * ```bash
- * git checkout main
- * git checkout -b boujot-rebrand
- * # add rebrand.ts and package.json script
- * git commit -m "Add rebrand script for @boujot/cli"
+ * Work on `master` branch (or feature branches off master).
+ * The rebrand script lives in master and is always available.
  *
- * git checkout -b boujot-rebranded
- * yarn rebrand
- * git add -A
- * git commit -m "Apply rebrand to @boujot/cli"
- * yarn build
- * npm publish --access public
- * ```
- *
- * ## Merging Upstream Updates
+ * ## Merging Community Updates
  *
  * ```bash
  * # 1. Update main from upstream
  * git checkout main
- * git pull upstream main
+ * git pull origin main   # or: git pull upstream main
  *
- * # 2. Merge into script branch (should be clean - script only adds files)
- * git checkout boujot-rebrand
+ * # 2. Merge into master
+ * git checkout master
  * git merge main
+ * ```
  *
- * # 3. Reset rebranded branch and re-apply
+ * ## Publishing to npm
+ *
+ * ```bash
+ * # 1. Reset rebranded branch to master and apply rebrand
  * git checkout boujot-rebranded
- * git reset --hard boujot-rebrand
+ * git reset --hard master
  * yarn rebrand
- * git add -A
+ * git add bin/ src/ package.json
  * git commit -m "Apply rebrand to @boujot/cli"
  *
- * # 4. Build and publish
+ * # 2. Build and publish
  * yarn build
  * npm publish --access public
+ *
+ * # 3. Return to master
+ * git checkout master
  * ```
  */
 

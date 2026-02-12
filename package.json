@@ -84,7 +84,9 @@
     "doctor": "node scripts/env-wrapper.cjs stable doctor",
     "// ==== Development Linking ====": "",
     "link:dev": "node scripts/link-dev.cjs",
-    "unlink:dev": "node scripts/link-dev.cjs unlink"
+    "unlink:dev": "node scripts/link-dev.cjs unlink",
+    "// ==== Rebranding ====": "",
+    "rebrand": "tsx scripts/rebrand.ts"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.8.0",

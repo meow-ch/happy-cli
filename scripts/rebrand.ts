@@ -246,6 +246,17 @@ function main() {
         [`'happy directly`, `'${NEW_BINARY} directly`],
     ]);
 
+    // 8. Update README.md for npm
+    console.log('\n📄 Updating README.md...');
+    replaceInFile(join(CLI_DIR, 'README.md'), [
+        [/# Happy\n/g, `# Boujot\n`],
+        [/npm install -g happy-coder/g, `npm install -g ${NEW_PACKAGE_NAME}`],
+        [/^happy$/gm, NEW_BINARY],
+        [/`happy`/g, `\`${NEW_BINARY}\``],
+        [/`happy /g, `\`${NEW_BINARY} `],
+        [/'happy'/g, `'${NEW_BINARY}'`],
+    ]);
+
     console.log('\n✅ Rebranding complete!\n');
     console.log('Next steps:');
     console.log('  1. yarn build       # Build the CLI');

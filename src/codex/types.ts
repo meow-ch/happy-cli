@@ -12,6 +12,7 @@ export interface CodexSessionConfig {
     model?: string;
     profile?: string;
     sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
+    model_reasoning_effort?: string;
 }
 
 export interface CodexToolResponse {

@@ -6,6 +6,22 @@ import { createSessionScanner } from "./utils/sessionScanner";
 
 export type LauncherResult = { type: 'switch' } | { type: 'exit', code: number };
 
+function formatUnexpectedClaudeExit(error: unknown): string {
+    const detail = error instanceof Error ? error.message : String(error ?? '');
+    const normalized = detail.toLowerCase();
+
+    if (normalized.includes('failed to spawn claude code process')) {
+        return 'Claude process quit unexpectedly. Check that Claude CLI is installed and available in PATH.';
+    }
+    if (normalized.includes('exited with code')) {
+        return 'Claude process quit unexpectedly. Check Claude authentication on this machine (run "claude" once), then retry.';
+    }
+    if (detail && detail !== '[object Object]') {
+        return `Claude process quit unexpectedly: ${detail}`;
+    }
+    return 'Claude process quit unexpectedly. Check Claude CLI installation and authentication, then retry.';
+}
+
 export async function claudeLocalLauncher(session: Session): Promise<LauncherResult> {
 
     // Create scanner
@@ -130,7 +146,7 @@ export async function claudeLocalLauncher(session: Session): Promise<LauncherRes
                     break;
                 }
                 if (!exitReason) {
-                    session.client.sendSessionEvent({ type: 'message', message: 'Process exited unexpectedly' });
+                    session.client.sendSessionEvent({ type: 'message', message: formatUnexpectedClaudeExit(e) });
                     continue;
                 } else {
                     break;

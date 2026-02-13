@@ -23,6 +23,22 @@ interface PermissionsField {
     allowedTools?: string[];
 }
 
+function formatUnexpectedClaudeExit(error: unknown): string {
+    const detail = error instanceof Error ? error.message : String(error ?? '');
+    const normalized = detail.toLowerCase();
+
+    if (normalized.includes('failed to spawn claude code process')) {
+        return 'Claude process quit unexpectedly. Check that Claude CLI is installed and available in PATH.';
+    }
+    if (normalized.includes('exited with code')) {
+        return 'Claude process quit unexpectedly. Check Claude authentication on this machine (run "claude" once), then retry.';
+    }
+    if (detail && detail !== '[object Object]') {
+        return `Claude process quit unexpectedly: ${detail}`;
+    }
+    return 'Claude process quit unexpectedly. Check Claude CLI installation and authentication, then retry.';
+}
+
 export async function claudeRemoteLauncher(session: Session): Promise<'switch' | 'exit'> {
     logger.debug('[claudeRemoteLauncher] Starting remote launcher');
 
@@ -403,7 +419,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             } catch (e) {
                 logger.debug('[remote]: launch error', e);
                 if (!exitReason) {
-                    session.client.sendSessionEvent({ type: 'message', message: 'Process exited unexpectedly' });
+                    session.client.sendSessionEvent({ type: 'message', message: formatUnexpectedClaudeExit(e) });
                     continue;
                 }
             } finally {

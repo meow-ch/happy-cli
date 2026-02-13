@@ -72,6 +72,7 @@ export async function runCodex(opts: {
     interface EnhancedMode {
         permissionMode: PermissionMode;
         model?: string;
+        reasoningEffort?: string;
     }
 
     //
@@ -154,12 +155,14 @@ export async function runCodex(opts: {
     const messageQueue = new MessageQueue2<EnhancedMode>((mode) => hashObject({
         permissionMode: mode.permissionMode,
         model: mode.model,
+        reasoningEffort: mode.reasoningEffort,
     }));
 
     // Track current overrides to apply per message
     // Use shared PermissionMode type from api/types for cross-agent compatibility
     let currentPermissionMode: import('@/api/types').PermissionMode | undefined = undefined;
     let currentModel: string | undefined = undefined;
+    let currentReasoningEffort: string | undefined = undefined;
 
     session.onUserMessage((message) => {
         // Resolve permission mode (accept all modes, will be mapped in switch statement)
@@ -182,6 +185,14 @@ export async function runCodex(opts: {
             logger.debug(`[Codex] User message received with no model override, using current: ${currentModel || 'default'}`);
         }
 
+        // Resolve reasoning effort; explicit null resets to default (undefined)
+        let messageReasoningEffort = currentReasoningEffort;
+        if (message.meta?.hasOwnProperty('reasoningEffort')) {
+            messageReasoningEffort = message.meta.reasoningEffort || undefined;
+            currentReasoningEffort = messageReasoningEffort;
+            logger.debug(`[Codex] Reasoning effort updated from user message: ${messageReasoningEffort || 'reset to default'}`);
+        }
+
         // Get text from message content (handles both text and multipart)
         const messageText = message.content.type === 'text'
             ? message.content.text
@@ -193,6 +204,7 @@ export async function runCodex(opts: {
         const enhancedMode: EnhancedMode = {
             permissionMode: messagePermissionMode || 'default',
             model: messageModel,
+            reasoningEffort: messageReasoningEffort,
         };
         messageQueue.push(messageText, enhancedMode);
     });
@@ -554,6 +566,16 @@ export async function runCodex(opts: {
                 diffProcessor.processDiff(msg.unified_diff);
             }
         }
+        if (msg.type === 'error' || msg.type === 'stream_error') {
+            const errorMessage = msg.message || msg.error || msg.text || JSON.stringify(msg);
+            logger.warn(`[Codex] Error from Codex: ${errorMessage}`);
+            messageBuffer.addMessage(`Error: ${errorMessage}`, 'system');
+            session.sendCodexMessage({
+                type: 'message',
+                message: `Error: ${errorMessage}`,
+                id: randomUUID()
+            });
+        }
     });
 
     // Start Happy MCP server (HTTP) and prepare STDIO bridge config for Codex
@@ -679,6 +701,9 @@ export async function runCodex(opts: {
                     if (message.mode.model) {
                         startConfig.model = message.mode.model;
                     }
+                    if (message.mode.reasoningEffort) {
+                        startConfig.model_reasoning_effort = message.mode.reasoningEffort;
+                    }
                     
                     // Check for resume file from multiple sources
                     let resumeFile: string | null = null;
@@ -729,8 +754,15 @@ export async function runCodex(opts: {
                     // Do not clear session state here; the next user message should continue on the
                     // existing session if possible.
                 } else {
-                    messageBuffer.addMessage('Process exited unexpectedly', 'status');
-                    session.sendSessionEvent({ type: 'message', message: 'Process exited unexpectedly' });
+                    const errorDetail = error instanceof Error ? error.message : String(error);
+                    const userMessage = `Codex error: ${errorDetail}`;
+                    messageBuffer.addMessage(userMessage, 'status');
+                    session.sendCodexMessage({
+                        type: 'message',
+                        message: userMessage,
+                        id: randomUUID()
+                    });
+                    session.sendSessionEvent({ type: 'message', message: userMessage });
                     // For unexpected exits, try to store session for potential recovery
                     if (client.hasActiveSession()) {
                         storedSessionIdForResume = client.storeSessionForResume();

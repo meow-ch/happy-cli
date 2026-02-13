@@ -130,14 +130,26 @@ function main() {
         join(CLI_DIR, 'bin', `${NEW_BINARY}-mcp.mjs`)
     );
 
-    // 3. Update configuration.ts - change config directory
+    // 3. Update MCP bridge references in source code (matches bin rename above)
+    console.log('\n🔗 Updating MCP bridge path references...');
+    const mcpBridgeFiles = [
+        'src/codex/runCodex.ts',
+        'src/gemini/runGemini.ts',
+    ];
+    for (const file of mcpBridgeFiles) {
+        replaceInFile(join(CLI_DIR, file), [
+            [/happy-mcp\.mjs/g, `${NEW_BINARY}-mcp.mjs`],
+        ]);
+    }
+
+    // 4. Update configuration.ts - change config directory
     console.log('\n⚙️  Updating configuration path...');
     replaceInFile(join(CLI_DIR, 'src', 'configuration.ts'), [
         [/join\(homedir\(\), '\.happy'\)/g, `join(homedir(), '${NEW_CONFIG_DIR}')`],
         [/'\.happy'/g, `'${NEW_CONFIG_DIR}'`],
     ]);
 
-    // 4. Update help text in source files
+    // 5. Update help text in source files
     console.log('\n📝 Updating help text...');
 
     // Files with help text to update
@@ -227,29 +239,29 @@ function main() {
         replaceInFile(join(CLI_DIR, file), helpTextReplacements);
     }
 
-    // 5. Update spawnHappyCLI.ts specifically
+    // 6. Update spawnHappyCLI.ts specifically
     console.log('\n🔧 Updating spawn command...');
     replaceInFile(join(CLI_DIR, 'src/utils/spawnHappyCLI.ts'), [
         [/const fullCommand = `happy /g, `const fullCommand = \`${NEW_BINARY} `],
     ]);
 
-    // 6. Update daemon/run.ts specifically
+    // 7. Update daemon/run.ts specifically
     replaceInFile(join(CLI_DIR, 'src/daemon/run.ts'), [
         [`'happy directly`, `'${NEW_BINARY} directly`],
     ]);
 
-    // 7. Update integration tests
+    // 8. Update integration tests
     replaceInFile(join(CLI_DIR, 'src/daemon/daemon.integration.test.ts'), [
         [`'happy directly`, `'${NEW_BINARY} directly`],
     ]);
 
-    // 8. Update auth.ts QR code messages
+    // 9. Update auth.ts QR code messages
     console.log('\n📱 Updating QR code messages...');
     replaceInFile(join(CLI_DIR, 'src/ui/auth.ts'), [
         [/Happy mobile app/g, 'Boujot mobile app'],
     ]);
 
-    // 9. Update README.md for npm
+    // 10. Update README.md for npm
     console.log('\n📄 Updating README.md...');
     replaceInFile(join(CLI_DIR, 'README.md'), [
         [/# Happy\n/g, `# Boujot\n`],

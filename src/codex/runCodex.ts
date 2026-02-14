@@ -23,7 +23,16 @@ import { MessageBuffer } from "@/ui/ink/messageBuffer";
 import { CodexDisplay } from "@/ui/ink/CodexDisplay";
 import { trimIdent } from "@/utils/trimIdent";
 import type { CodexSessionConfig } from './types';
-import { CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
+// Codex does not support the Gemini-style `functions.happy__change_title` instruction.
+// It can, however, call MCP tools exposed via `mcp_servers` (see `mcpServers` below).
+const CODEX_CHANGE_TITLE_INSTRUCTION = [
+    'Based on the user\'s message, set a concise and specific session title (2-6 words).',
+    'Do NOT use generic titles like "Set Session Title", "Session Title", "New Session", "Chat", or "Conversation".',
+    'If the message is too short or not informative (e.g. "ok", "yeah", "test"), do not change the title.',
+    // Tool name varies across MCP routers; accept either.
+    'Call the MCP tool `mcp__happy__change__title` (or `mcp__happy__change_title` if that is what you see) with JSON: {"title": "<new title>"}',
+    'If the task changes significantly, call it again to update the title.',
+].join(' ');
 import { notifyDaemonSessionStarted } from "@/daemon/controlClient";
 import { registerKillSessionHandler } from "@/claude/registerKillSessionHandler";
 import { delay } from "@/utils/time";
@@ -583,8 +592,9 @@ export async function runCodex(opts: {
     const bridgeCommand = join(projectPath(), 'bin', 'happy-mcp.mjs');
     const mcpServers = {
         happy: {
-            command: bridgeCommand,
-            args: ['--url', happyServer.url]
+            // Run via Node directly to avoid shebang/exec-bit issues across environments.
+            command: process.execPath,
+            args: [bridgeCommand, '--url', happyServer.url]
         }
     } as const;
     let first = true;
@@ -693,7 +703,7 @@ export async function runCodex(opts: {
 
                 if (!wasCreated) {
                     const startConfig: CodexSessionConfig = {
-                        prompt: first ? message.message + '\n\n' + CHANGE_TITLE_INSTRUCTION : message.message,
+                        prompt: first ? message.message + '\n\n' + CODEX_CHANGE_TITLE_INSTRUCTION : message.message,
                         sandbox,
                         'approval-policy': approvalPolicy,
                         config: { mcp_servers: mcpServers }

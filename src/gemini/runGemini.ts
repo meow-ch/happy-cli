@@ -501,8 +501,9 @@ export async function runGemini(opts: {
   const bridgeCommand = join(projectPath(), 'bin', 'happy-mcp.mjs');
   const mcpServers = {
     happy: {
-      command: bridgeCommand,
-      args: ['--url', happyServer.url]
+      // Run via Node directly to avoid shebang/exec-bit issues across environments.
+      command: process.execPath,
+      args: [bridgeCommand, '--url', happyServer.url]
     }
   };
 

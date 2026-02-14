@@ -11,6 +11,18 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { configuration } from '@/configuration';
 
+function readDaemonLockPid(): number | null {
+  try {
+    // lock file is written with PID on acquisition
+    const raw = readFileSync(configuration.daemonLockFile, 'utf-8').trim();
+    const pid = Number(raw);
+    if (!Number.isFinite(pid) || pid <= 0) return null;
+    return pid;
+  } catch {
+    return null;
+  }
+}
+
 async function daemonPost(path: string, body?: any): Promise<{ error?: string } | any> {
   const state = await readDaemonState();
   if (!state?.httpPort) {
@@ -197,7 +209,36 @@ export async function stopDaemon() {
   try {
     const state = await readDaemonState();
     if (!state) {
-      logger.debug('No daemon state found');
+      // Handle "crashed during startup" daemons:
+      // if they managed to acquire the lock but never wrote daemon.state.json,
+      // normal stop can't find them. Use lock PID as a fallback.
+      const lockPid = readDaemonLockPid();
+      if (!lockPid) {
+        logger.debug('No daemon state found');
+        return;
+      }
+
+      // If the process is already dead, clear the lock and move on.
+      try {
+        process.kill(lockPid, 0);
+      } catch {
+        logger.debug(`[CONTROL CLIENT] Lock PID ${lockPid} is not running, clearing stale lock/state`);
+        await cleanupDaemonState();
+        return;
+      }
+
+      logger.debug(`[CONTROL CLIENT] No daemon state found, but lock PID ${lockPid} is running. Force stopping.`);
+      try {
+        process.kill(lockPid, 'SIGTERM');
+        await waitForProcessDeath(lockPid, 2000);
+      } catch (error) {
+        logger.debug('[CONTROL CLIENT] SIGTERM stop failed, will SIGKILL', error);
+        try {
+          process.kill(lockPid, 'SIGKILL');
+        } catch { }
+      } finally {
+        await cleanupDaemonState();
+      }
       return;
     }
 

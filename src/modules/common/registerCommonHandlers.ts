@@ -6,6 +6,7 @@ import { createHash } from 'crypto';
 import { join } from 'path';
 import { run as runRipgrep } from '@/modules/ripgrep/index';
 import { run as runDifftastic } from '@/modules/difftastic/index';
+import { codexModelList, type CodexModelInfo } from '@/codex/codexModelList';
 import { RpcHandlerManager } from '../../api/rpc/RpcHandlerManager';
 import { validatePath } from './pathSecurity';
 
@@ -107,6 +108,12 @@ interface DifftasticResponse {
     exitCode?: number;
     stdout?: string;
     stderr?: string;
+    error?: string;
+}
+
+interface CodexModelsListResponse {
+    success: boolean;
+    models?: CodexModelInfo[];
     error?: string;
 }
 
@@ -517,6 +524,16 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to run difftastic'
             };
+        }
+    });
+
+    // Codex models list handler - dynamic model discovery from local Codex CLI.
+    rpcHandlerManager.registerHandler<{}, CodexModelsListResponse>('codex-models-list', async () => {
+        try {
+            const models = await codexModelList({ timeoutMs: 10_000 });
+            return { success: true, models };
+        } catch (error) {
+            return { success: false, error: error instanceof Error ? error.message : 'Failed to list Codex models' };
         }
     });
 }

@@ -17,6 +17,22 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { z } from 'zod';
 
+function formatBridgeError(error: unknown): string {
+  // StreamableHTTPError has a numeric `code` (HTTP status) but is not exported as a type from all build targets.
+  // We surface it if present so the UI is actionable.
+  const anyErr = error as any;
+  const msg =
+    error instanceof Error
+      ? (error.message || String(error))
+      : String(error ?? 'Unknown error');
+
+  if (anyErr && typeof anyErr === 'object' && typeof anyErr.code === 'number') {
+    return `${msg} (HTTP ${anyErr.code})`;
+  }
+
+  return msg;
+}
+
 function parseArgs(argv: string[]): { url: string | null } {
   let url: string | null = null;
   for (let i = 0; i < argv.length; i++) {
@@ -63,32 +79,42 @@ async function main() {
     version: '1.0.0',
   });
 
-  // Register the single tool and forward to HTTP MCP
-  server.registerTool(
-    'change_title',
-    {
-      description: 'Change the title of the current chat session',
-      title: 'Change Chat Title',
-      inputSchema: {
-        title: z.string().describe('The new title for the chat session'),
-      },
-    },
-    async (args) => {
-      try {
-        const client = await ensureHttpClient();
-        const response = await client.callTool({ name: 'change_title', arguments: args });
-        // Pass-through response from HTTP server
-        return response as any;
-      } catch (error) {
-        return {
-          content: [
-            { type: 'text', text: `Failed to change chat title: ${error instanceof Error ? error.message : String(error)}` },
-          ],
-          isError: true,
-        };
-      }
+  const changeTitleToolSchema = {
+    description: 'Change the title of the current chat session',
+    title: 'Change Chat Title',
+    // MCP SDK expects a Zod schema (not a plain object of fields).
+    inputSchema: z.object({
+      title: z.string().describe('The new title for the chat session'),
+    }),
+  };
+
+  const changeTitleToolHandler = async (args: any) => {
+    try {
+      const client = await ensureHttpClient();
+      const response = await client.callTool({ name: 'change_title', arguments: args });
+      // Pass-through response from HTTP server
+      return response as any;
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Failed to change chat title: ${formatBridgeError(error)}`,
+          },
+        ],
+        isError: true,
+      };
     }
-  );
+  };
+
+  // Register primary tool name used in our MCP prompts.
+  server.registerTool('change_title', changeTitleToolSchema, changeTitleToolHandler);
+  // Some MCP tool routers escape underscores as double-underscores in composite names.
+  // Register an alias so calls to `mcp__happy__change__title` can still resolve.
+  server.registerTool('change__title', changeTitleToolSchema, changeTitleToolHandler);
+  // Register an alias for compatibility with older prompts / transports.
+  server.registerTool('happy__change_title', changeTitleToolSchema, changeTitleToolHandler);
+  server.registerTool('happy__change__title', changeTitleToolSchema, changeTitleToolHandler);
 
   // Start STDIO transport
   const stdio = new StdioServerTransport();

@@ -42,9 +42,10 @@ export async function startHappyServer(client: ApiSessionClient) {
     mcp.registerTool('change_title', {
         description: 'Change the title of the current chat session',
         title: 'Change Chat Title',
-        inputSchema: {
+        // MCP SDK expects a Zod schema (not a plain object of fields).
+        inputSchema: z.object({
             title: z.string().describe('The new title for the chat session'),
-        },
+        }),
     }, async (args) => {
         const response = await handler(args.title);
         logger.debug('[happyMCP] Response:', response);
@@ -89,7 +90,10 @@ export async function startHappyServer(client: ApiSessionClient) {
         } catch (error) {
             logger.debug("Error handling request:", error);
             if (!res.headersSent) {
-                res.writeHead(500).end();
+                // Return a small body so the HTTP client error includes actionable details.
+                const msg = error instanceof Error ? (error.stack || error.message) : String(error);
+                res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+                res.end(msg);
             }
         }
     });

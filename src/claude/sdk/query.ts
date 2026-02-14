@@ -361,12 +361,23 @@ export function query(config: {
         childStdin = child.stdin
     }
 
-    // Handle stderr in debug mode
-    if (process.env.DEBUG) {
-        child.stderr.on('data', (data) => {
-            console.error('Claude Code stderr:', data.toString())
-        })
+    // Capture a small stderr buffer for error reporting (daemon sessions run without TTY, so this
+    // is often the only way to surface "not installed / not logged in" type failures).
+    let stderrBuf = ''
+    const redactSecrets = (input: string) => {
+        // Best-effort redaction (avoid leaking tokens into server logs / UI).
+        return input
+            .replace(/\bsk-[A-Za-z0-9_-]{10,}\b/g, 'sk-REDACTED')
+            .replace(/\bnpm_[A-Za-z0-9_-]{10,}\b/g, 'npm_REDACTED')
+            .replace(/\bBearer\s+[A-Za-z0-9._-]{10,}\b/gi, 'Bearer REDACTED')
     }
+    child.stderr.on('data', (data) => {
+        const text = data.toString()
+        stderrBuf = (stderrBuf + text).slice(-16_384)
+        if (process.env.DEBUG) {
+            console.error('Claude Code stderr:', text)
+        }
+    })
 
     // Setup cleanup
     const cleanup = () => {
@@ -385,7 +396,9 @@ export function query(config: {
                 query.setError(new AbortError('Claude Code process aborted by user'))
             }
             if (code !== 0) {
-                query.setError(new Error(`Claude Code process exited with code ${code}`))
+                const trimmed = stderrBuf.trim()
+                const suffix = trimmed ? `\n\nstderr:\n${redactSecrets(trimmed)}` : ''
+                query.setError(new Error(`Claude Code process exited with code ${code}${suffix}`))
             } else {
                 resolve()
             }

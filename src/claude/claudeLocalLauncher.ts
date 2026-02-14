@@ -9,15 +9,23 @@ export type LauncherResult = { type: 'switch' } | { type: 'exit', code: number }
 function formatUnexpectedClaudeExit(error: unknown): string {
     const detail = error instanceof Error ? error.message : String(error ?? '');
     const normalized = detail.toLowerCase();
+    const clipped = detail.length > 3000 ? `${detail.slice(0, 3000)}\n…(truncated)` : detail;
 
     if (normalized.includes('failed to spawn claude code process')) {
         return 'Claude process quit unexpectedly. Check that Claude CLI is installed and available in PATH.';
     }
+    if (normalized.includes('claude code is not installed') || normalized.includes('please install claude code')) {
+        return `Claude Code is not installed on this machine.\n\n${clipped}`;
+    }
     if (normalized.includes('exited with code')) {
-        return 'Claude process quit unexpectedly. Check Claude authentication on this machine (run "claude" once), then retry.';
+        // Prefer showing stderr detail if we captured it (helps with install/login debugging).
+        if (normalized.includes('stderr:')) {
+            return `Claude process quit unexpectedly:\n\n${clipped}`;
+        }
+        return 'Claude process quit unexpectedly. Check Claude installation and authentication on this machine (try running "claude" once), then retry.';
     }
     if (detail && detail !== '[object Object]') {
-        return `Claude process quit unexpectedly: ${detail}`;
+        return `Claude process quit unexpectedly: ${clipped}`;
     }
     return 'Claude process quit unexpectedly. Check Claude CLI installation and authentication, then retry.';
 }

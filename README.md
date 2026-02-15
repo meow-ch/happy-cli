@@ -137,6 +137,20 @@ GOOGLE_CLOUD_PROJECT=your-project-id happy gemini
 
 Interested in contributing? See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
+## Boujot Fork: Release Helper
+
+This repo includes an internal helper script to cut a versioned Boujot CLI release branch from the current commit:
+
+```bash
+cd packages/happy-cli
+npm run release:boujot -- 0.14.0-4 --tag beta
+```
+
+Notes:
+- The helper requires a clean working tree.
+- It creates `boujot-cli-release/<version>`, bumps the CLI version, runs `yarn rebrand`, runs build/tests (unless skipped), and commits the result.
+- For publishing, you can set `NPM_TOKEN` or put `NPM_GRANULAR_ACCESS_TOKEN=...` in `packages/happy-cli/.env` (gitignored).
+
 ## Requirements
 
 - Node.js >= 20.0.0

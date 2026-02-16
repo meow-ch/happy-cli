@@ -37,6 +37,32 @@ Start a Gemini CLI session with remote control capabilities.
 happy connect gemini
 ```
 
+## Architecture & Dependencies
+
+Boujot has five core pieces:
+
+1. `happy-app` (mobile app)
+2. Metro (only when developing `happy-app`)
+3. `@boujot/cli` (`boujot` command)
+4. `boujot daemon` (background mode of the CLI)
+5. Boujot server (`HAPPY_SERVER_URL`)
+
+How they depend on each other:
+
+- The server is the shared source of truth for account, sessions, and machines.
+- `boujot daemon` is the process that keeps your computer registered as an online machine and routes work to local agent processes.
+- `boujot` interactive sessions (Claude/Codex/Gemini) also sync via the server, which is why they appear in the app.
+- The app talks to the server, selects a machine, and sends actions that are handled by the daemon on that machine.
+- Metro is only needed for app development/hot reload; it is not part of production runtime and not required for CLI/daemon operation.
+
+Minimal end-to-end requirements (app controlling your machine):
+
+1. Server reachable
+2. CLI authenticated (`boujot auth login`)
+3. Daemon running (`boujot daemon start`)
+4. App authenticated to the same account
+5. Machine selected in the app
+
 ## Commands
 
 ### Main Commands

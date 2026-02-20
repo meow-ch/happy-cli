@@ -87,6 +87,8 @@
     "unlink:dev": "node scripts/link-dev.cjs unlink",
     "// ==== Rebranding ====": "",
     "rebrand": "tsx scripts/rebrand.ts",
+    "dev:deploy": "bash scripts/dev-deploy.sh",
+    "publish:boujot": "bash scripts/publish-boujot.sh",
     "release:boujot": "bash scripts/release-boujot-cli.sh"
   },
   "dependencies": {

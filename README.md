@@ -43,7 +43,7 @@ Boujot has five core pieces:
 
 1. `happy-app` (mobile app)
 2. Metro (only when developing `happy-app`)
-3. `@boujot/cli` (`boujot` command)
+3. `@boujot/happy-coder` (`boujot` command)
 4. `boujot daemon` (background mode of the CLI)
 5. Boujot server (`HAPPY_SERVER_URL`)
 

@@ -15,7 +15,7 @@ export type Flavor = 'happy' | 'boujot'
 
 /**
  * Detect whether we're running as the boujot or happy flavor.
- * When installed as @boujot/happy-cli, the dist path on disk contains '@boujot'.
+ * When installed as @boujot/happy-coder, the dist path on disk contains '@boujot'.
  * In dev (tsx src/index.ts from workspace), the path has no '@boujot' → defaults to 'happy'.
  */
 function detectFlavor(): Flavor {

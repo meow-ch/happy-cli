@@ -223,8 +223,8 @@ function main() {
         'src/commands/auth.ts',
         'src/commands/connect.ts',
         'src/api/api.ts',
-        'src/utils/serverConnectionErrors.ts',
-        'src/utils/serverConnectionErrors.test.ts',
+        // serverConnectionErrors.ts uses configuration.cliName at runtime — no rebrand needed
+        // serverConnectionErrors.test.ts hardcodes 'happy' to match the test-time cliName
         'src/utils/spawnHappyCLI.ts',
         'src/agent/factories/gemini.ts',
         'src/gemini/runGemini.ts',

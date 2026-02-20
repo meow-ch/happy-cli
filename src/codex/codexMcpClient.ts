@@ -7,9 +7,19 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { logger } from '@/ui/logger';
 import type { CodexSessionConfig, CodexToolResponse } from './types';
 import { z } from 'zod';
-import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { execSync } from 'child_process';
+
+// Custom elicitation schema that preserves Codex-specific fields (codex_call_id, etc.).
+// The standard ElicitRequestSchema uses Zod's default strip mode which silently drops
+// unknown properties. Codex sends custom fields like codex_call_id, codex_command, and
+// codex_cwd as top-level params, so we need .passthrough() to keep them.
+const CodexElicitRequestSchema = z.object({
+    method: z.literal('elicitation/create'),
+    params: z.object({
+        message: z.string(),
+    }).passthrough(),
+}).passthrough();
 
 const DEFAULT_TIMEOUT = 14 * 24 * 60 * 60 * 1000; // 14 days, which is the half of the maximum possible timeout (~28 days for int32 value in NodeJS)
 
@@ -124,14 +134,26 @@ export class CodexMcpClient {
     }
 
     private registerPermissionHandlers(): void {
-        // Register handler for exec command approval requests
-        this.client.setRequestHandler(
-            ElicitRequestSchema,
-            async (request) => {
-                console.log('[CodexMCP] Received elicitation request:', request.params);
-
-                // Load params
-                const params = request.params as unknown as {
+        // Register handler for exec command approval requests.
+        //
+        // We MUST bypass the Client's overridden setRequestHandler and call
+        // Protocol's base version directly. The Client override wraps elicitation
+        // handlers with ElicitResultSchema validation (which rejects responses
+        // without an `action` field) and strips unknown fields. Codex uses a
+        // NON-STANDARD response format { decision: ReviewDecision } that doesn't
+        // conform to the MCP ElicitResult spec. Using the base Protocol handler
+        // passes our response through without validation or field stripping.
+        //
+        // Also uses CodexElicitRequestSchema (passthrough) instead of the SDK's
+        // ElicitRequestSchema because Codex sends custom fields (codex_call_id,
+        // codex_command, codex_cwd) as top-level params that the standard schema
+        // would strip.
+        const protocolProto = Object.getPrototypeOf(Object.getPrototypeOf(this.client));
+        protocolProto.setRequestHandler.call(
+            this.client,
+            CodexElicitRequestSchema,
+            async (request: any) => {
+                const params = request.params as {
                     message: string,
                     codex_elicitation: string,
                     codex_mcp_tool_call_id: string,
@@ -139,21 +161,31 @@ export class CodexMcpClient {
                     codex_call_id: string,
                     codex_command: string[],
                     codex_cwd: string
+                };
+
+                // Derive permission ID with intentional priority.
+                // codex_call_id is the exec-level call ID that matches the call_id
+                // in exec_approval_request events (used as tool call ID in the app).
+                const permissionId = params.codex_call_id || params.codex_mcp_tool_call_id;
+                logger.debug('[CodexMCP] Elicitation fields - codex_call_id:', params.codex_call_id,
+                    'codex_mcp_tool_call_id:', params.codex_mcp_tool_call_id,
+                    'permissionId:', permissionId, 'keys:', Object.keys(params));
+
+                if (!permissionId || typeof permissionId !== 'string' || permissionId.trim().length === 0) {
+                    logger.debug('[CodexMCP] Elicitation missing permission ID, denying. Keys:', Object.keys(params));
+                    return { decision: 'denied' as const };
                 }
+
                 const toolName = 'CodexBash';
 
-                // If no permission handler set, deny by default
                 if (!this.permissionHandler) {
-                    logger.debug('[CodexMCP] No permission handler set, denying by default');
-                    return {
-                        decision: 'denied' as const,
-                    };
+                    logger.debug('[CodexMCP] No permission handler set, denying');
+                    return { decision: 'denied' as const };
                 }
 
                 try {
-                    // Request permission through the handler
                     const result = await this.permissionHandler.handleToolCall(
-                        params.codex_call_id,
+                        permissionId,
                         toolName,
                         {
                             command: params.codex_command,
@@ -162,15 +194,19 @@ export class CodexMcpClient {
                     );
 
                     logger.debug('[CodexMCP] Permission result:', result);
-                    return {
-                        decision: result.decision
-                    }
+
+                    // Codex uses a NON-STANDARD elicitation response format:
+                    // { decision: ReviewDecision } where ReviewDecision is one of:
+                    // "approved", "approved_for_session", "approved_execpolicy_amendment", "denied"
+                    // See codex-rs/mcp-server/src/exec_approval.rs (ExecApprovalResponse)
+                    // This does NOT conform to the MCP ElicitResult spec ({ action, content }).
+                    const decision = result.decision === 'approved' || result.decision === 'approved_for_session'
+                        ? result.decision
+                        : 'denied';
+                    return { decision };
                 } catch (error) {
                     logger.debug('[CodexMCP] Error handling permission request:', error);
-                    return {
-                        decision: 'denied' as const,
-                        reason: error instanceof Error ? error.message : 'Permission request failed'
-                    };
+                    return { decision: 'denied' as const };
                 }
             }
         );

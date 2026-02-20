@@ -77,13 +77,15 @@ export async function runDoctorCommand(filter?: 'all' | 'daemon'): Promise<void>
         filter = 'all';
     }
     
-    console.log(chalk.bold.cyan('\n🩺 Happy CLI Doctor\n'));
+    const cli = configuration.cliName;
+    const brand = configuration.brandName;
+    console.log(chalk.bold.cyan(`\n🩺 ${brand} CLI Doctor\n`));
 
     // For 'all' filter, show everything. For 'daemon', only show daemon-related info
     if (filter === 'all') {
         // Version and basic info
         console.log(chalk.bold('📋 Basic Information'));
-        console.log(`Happy CLI Version: ${chalk.green(packageJson.version)}`);
+        console.log(`${brand} CLI Version: ${chalk.green(packageJson.version)}`);
         console.log(`Platform: ${chalk.green(process.platform)} ${process.arch}`);
         console.log(`Node.js Version: ${chalk.green(process.version)}`);
         console.log('');
@@ -103,7 +105,7 @@ export async function runDoctorCommand(filter?: 'all' | 'daemon'): Promise<void>
 
         // Configuration
         console.log(chalk.bold('⚙️  Configuration'));
-        console.log(`Happy Home: ${chalk.blue(configuration.happyHomeDir)}`);
+        console.log(`${brand} Home: ${chalk.blue(configuration.happyHomeDir)}`);
         console.log(`Server URL: ${chalk.blue(configuration.serverUrl)}`);
         console.log(`Logs Dir: ${chalk.blue(configuration.logsDir)}`);
 
@@ -170,7 +172,7 @@ export async function runDoctorCommand(filter?: 'all' | 'daemon'): Promise<void>
         // All Happy processes
         const allProcesses = await findAllHappyProcesses();
         if (allProcesses.length > 0) {
-            console.log(chalk.bold('\n🔍 All Happy CLI Processes'));
+            console.log(chalk.bold(`\n🔍 All ${brand} CLI Processes`));
 
             // Group by type
             const grouped = allProcesses.reduce((groups, process) => {
@@ -205,12 +207,12 @@ export async function runDoctorCommand(filter?: 'all' | 'daemon'): Promise<void>
                 });
             });
         } else {
-            console.log(chalk.red('❌ No happy processes found'));
+            console.log(chalk.red(`❌ No ${cli} processes found`));
         }
 
         if (filter === 'all' && allProcesses.length > 1) { // More than just current process
             console.log(chalk.bold('\n💡 Process Management'));
-            console.log(chalk.gray('To clean up runaway processes: happy doctor clean'));
+            console.log(chalk.gray(`To clean up runaway processes: ${cli} doctor clean`));
         }
     } catch (error) {
         console.log(chalk.red('❌ Error checking daemon status'));

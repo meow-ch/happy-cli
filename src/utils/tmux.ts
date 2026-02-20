@@ -22,6 +22,7 @@
 import { spawn, SpawnOptions } from 'child_process';
 import { promisify } from 'util';
 import { logger } from '@/ui/logger';
+import { configuration } from '@/configuration';
 
 export enum TmuxControlState {
     /** Normal text processing mode */
@@ -355,7 +356,7 @@ const CONTROL_SEQUENCES: Set<TmuxControlSequence> = new Set([
 
 export class TmuxUtilities {
     /** Default session name to prevent interference */
-    public static readonly DEFAULT_SESSION_NAME = "happy";
+    public static readonly DEFAULT_SESSION_NAME = configuration.cliName;
 
     private controlState: TmuxControlState = TmuxControlState.NORMAL;
     public readonly sessionName: string;
@@ -770,13 +771,13 @@ export class TmuxUtilities {
                     sessionName = firstSession;
                     logger.debug(`[TMUX] Using first existing session: ${sessionName}`);
                 } else {
-                    // No sessions exist, create "happy"
-                    sessionName = 'happy';
+                    // No sessions exist, create default
+                    sessionName = configuration.cliName;
                     logger.debug(`[TMUX] No existing sessions, using default: ${sessionName}`);
                 }
             }
 
-            const windowName = options.windowName || `happy-${Date.now()}`;
+            const windowName = options.windowName || `${configuration.cliName}-${Date.now()}`;
 
             // Ensure session exists
             await this.ensureSessionExists(sessionName);

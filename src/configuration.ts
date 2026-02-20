@@ -1,16 +1,44 @@
 /**
  * Global configuration for happy CLI
- * 
+ *
  * Centralizes all configuration including environment variables and paths
  * Environment files should be loaded using Node's --env-file flag
  */
 
 import { existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import packageJson from '../package.json'
 
+export type Flavor = 'happy' | 'boujot'
+
+/**
+ * Detect whether we're running as the boujot or happy flavor.
+ * When installed as @boujot/happy-cli, the dist path on disk contains '@boujot'.
+ * In dev (tsx src/index.ts from workspace), the path has no '@boujot' → defaults to 'happy'.
+ */
+function detectFlavor(): Flavor {
+  // Env var override for local dev testing (HAPPY_FLAVOR=boujot ./bin/happy.mjs ...)
+  const envFlavor = process.env.HAPPY_FLAVOR
+  if (envFlavor === 'boujot' || envFlavor === 'happy') return envFlavor
+
+  try {
+    const dir = dirname(fileURLToPath(import.meta.url))
+    if (dir.includes('@boujot')) return 'boujot'
+  } catch {}
+  return 'happy'
+}
+
 class Configuration {
+  public readonly flavor: Flavor
+  /** CLI command name: 'happy' or 'boujot' — use in help text and command examples */
+  public readonly cliName: string
+  /** Display brand: 'Happy' or 'Boujot' — use in user-facing messages */
+  public readonly brandName: string
+  /** Config directory name: '.happy' or '.boujot' */
+  public readonly configDirName: string
+
   public readonly serverUrl: string
   public readonly webappUrl: string
   public readonly isDaemonProcess: boolean
@@ -28,6 +56,12 @@ class Configuration {
   public readonly disableCaffeinate: boolean
 
   constructor() {
+    // Flavor detection — determines branding, config dir, command name
+    this.flavor = detectFlavor()
+    this.cliName = this.flavor === 'boujot' ? 'boujot' : 'happy'
+    this.brandName = this.flavor === 'boujot' ? 'Boujot' : 'Happy'
+    this.configDirName = this.flavor === 'boujot' ? '.boujot' : '.happy'
+
     // Server configuration - priority: parameter > environment > default
     this.serverUrl = process.env.HAPPY_SERVER_URL || 'https://api.cluster-fluster.com'
     this.webappUrl = process.env.HAPPY_WEBAPP_URL || 'https://app.happy.engineering'
@@ -42,7 +76,7 @@ class Configuration {
       const expandedPath = process.env.HAPPY_HOME_DIR.replace(/^~/, homedir())
       this.happyHomeDir = expandedPath
     } else {
-      this.happyHomeDir = join(homedir(), '.happy')
+      this.happyHomeDir = join(homedir(), this.configDirName)
     }
 
     this.logsDir = join(this.happyHomeDir, 'logs')
@@ -61,7 +95,7 @@ class Configuration {
     if (variant === 'dev' && !this.happyHomeDir.includes('dev')) {
       console.warn('⚠️  WARNING: HAPPY_VARIANT=dev but HAPPY_HOME_DIR does not contain "dev"')
       console.warn(`   Current: ${this.happyHomeDir}`)
-      console.warn(`   Expected: Should contain "dev" (e.g., ~/.happy-dev)`)
+      console.warn(`   Expected: Should contain "dev" (e.g., ~/${this.configDirName}-dev)`)
     }
 
     // Visual indicator on CLI startup (only if not daemon process to avoid log clutter)

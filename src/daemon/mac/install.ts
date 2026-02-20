@@ -16,9 +16,10 @@ import { writeFileSync, chmodSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import { logger } from '@/ui/logger';
 import { trimIdent } from '@/utils/trimIdent';
+import { configuration } from '@/configuration';
 import os from 'os';
 
-const PLIST_LABEL = 'com.happy-cli.daemon';
+const PLIST_LABEL = `com.${configuration.cliName}-cli.daemon`;
 const PLIST_FILE = `/Library/LaunchDaemons/${PLIST_LABEL}.plist`;
 
 // NOTE: Local installation like --local does not make too much sense I feel like
@@ -64,10 +65,10 @@ export async function install(): Promise<void> {
                 <true/>
                 
                 <key>StandardErrorPath</key>
-                <string>${os.homedir()}/.happy/daemon.err</string>
-                
+                <string>${os.homedir()}/${configuration.configDirName}/daemon.err</string>
+
                 <key>StandardOutPath</key>
-                <string>${os.homedir()}/.happy/daemon.log</string>
+                <string>${os.homedir()}/${configuration.configDirName}/daemon.log</string>
                 
                 <key>WorkingDirectory</key>
                 <string>/tmp</string>
@@ -85,7 +86,7 @@ export async function install(): Promise<void> {
         execSync(`launchctl load ${PLIST_FILE}`, { stdio: 'inherit' });
 
         logger.info('Daemon installed and started successfully');
-        logger.info('Check logs at ~/.happy/daemon.log');
+        logger.info(`Check logs at ~/${configuration.configDirName}/daemon.log`);
 
     } catch (error) {
         logger.debug('Failed to install daemon:', error);

@@ -13,6 +13,7 @@ import { logger } from './ui/logger'
 import { readCredentials, readSettings } from './persistence'
 import { authAndSetupMachineIfNeeded } from './ui/auth'
 import packageJson from '../package.json'
+import { configuration } from './configuration'
 import { z } from 'zod'
 import { startDaemon } from './daemon/run'
 import { checkIfDaemonRunningAndCleanupStaleState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './daemon/controlClient'
@@ -35,7 +36,7 @@ import { execFileSync } from 'node:child_process'
 
   // If --version is passed - do not log, its likely daemon inquiring about our version
   if (!args.includes('--version')) {
-    logger.debug('Starting happy CLI with args: ', process.argv)
+    logger.debug(`Starting ${configuration.cliName} CLI with args: `, process.argv)
   }
 
   // Check if first argument is a subcommand
@@ -260,7 +261,7 @@ import { execFileSync } from 'node:child_process'
           console.log('No Google Cloud Project configured.');
           console.log('');
           console.log('If you see "Authentication required" error, you may need to set a project:');
-          console.log('  happy gemini project set <your-project-id>');
+          console.log(`  ${configuration.cliName} gemini project set <your-project-id>`);
           console.log('');
           console.log('This is required for Google Workspace accounts.');
           console.log('Guide: https://goo.gle/gemini-cli-auth-docs#workspace-gca');
@@ -274,7 +275,8 @@ import { execFileSync } from 'node:child_process'
     
     // Handle "happy gemini project" (no subcommand) - show help
     if (geminiSubcommand === 'project' && !args[2]) {
-      console.log('Usage: happy gemini project <command>');
+      const cli = configuration.cliName;
+      console.log(`Usage: ${cli} gemini project <command>`);
       console.log('');
       console.log('Commands:');
       console.log('  set <project-id>   Set Google Cloud Project ID');
@@ -304,9 +306,9 @@ import { execFileSync } from 'node:child_process'
       } = await authAndSetupMachineIfNeeded();
 
       // Auto-start daemon for gemini (same as claude)
-      logger.debug('Ensuring Happy background service is running & matches our version...');
+      logger.debug(`Ensuring ${configuration.brandName} background service is running & matches our version...`);
       if (!(await isDaemonRunningCurrentlyInstalledHappyVersion())) {
-        logger.debug('Starting Happy background service...');
+        logger.debug(`Starting ${configuration.brandName} background service...`);
         const daemonProcess = spawnHappyCLI(['daemon', 'start-sync'], {
           detached: true,
           stdio: 'ignore',
@@ -327,7 +329,7 @@ import { execFileSync } from 'node:child_process'
     return;
   } else if (subcommand === 'logout') {
     // Keep for backward compatibility - redirect to auth logout
-    console.log(chalk.yellow('Note: "happy logout" is deprecated. Use "happy auth logout" instead.\n'));
+    console.log(chalk.yellow(`Note: "${configuration.cliName} logout" is deprecated. Use "${configuration.cliName} auth logout" instead.\n`));
     try {
       await handleAuthCommand(['logout']);
     } catch (error) {
@@ -444,21 +446,22 @@ import { execFileSync } from 'node:child_process'
         process.exit(1)
       }
     } else {
+      const cli = configuration.cliName;
       console.log(`
-${chalk.bold('happy daemon')} - Daemon management
+${chalk.bold(`${cli} daemon`)} - Daemon management
 
 ${chalk.bold('Usage:')}
-  happy daemon start              Start the daemon (detached)
-  happy daemon stop               Stop the daemon (sessions stay alive)
-  happy daemon status             Show daemon status
-  happy daemon list               List active sessions
+  ${cli} daemon start              Start the daemon (detached)
+  ${cli} daemon stop               Stop the daemon (sessions stay alive)
+  ${cli} daemon status             Show daemon status
+  ${cli} daemon list               List active sessions
 
-  If you want to kill all happy related processes run 
-  ${chalk.cyan('happy doctor clean')}
+  If you want to kill all ${cli} related processes run
+  ${chalk.cyan(`${cli} doctor clean`)}
 
 ${chalk.bold('Note:')} The daemon runs in the background and manages Claude sessions.
 
-${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor clean')}
+${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan(`${cli} doctor clean`)}
 `)
     }
     return;
@@ -551,36 +554,38 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
 
     // Show help
     if (showHelp) {
+      const cli = configuration.cliName;
+      const brand = configuration.brandName;
       console.log(`
-${chalk.bold('happy')} - Claude Code On the Go
+${chalk.bold(cli)} - Claude Code On the Go
 
 ${chalk.bold('Usage:')}
-  happy [options]         Start Claude with mobile control
-  happy auth              Manage authentication
-  happy codex             Start Codex mode
-  happy gemini            Start Gemini mode (ACP)
-  happy connect           Connect AI vendor API keys
-  happy notify            Send push notification
-  happy daemon            Manage background service that allows
+  ${cli} [options]         Start Claude with mobile control
+  ${cli} auth              Manage authentication
+  ${cli} codex             Start Codex mode
+  ${cli} gemini            Start Gemini mode (ACP)
+  ${cli} connect           Connect AI vendor API keys
+  ${cli} notify            Send push notification
+  ${cli} daemon            Manage background service that allows
                             to spawn new sessions away from your computer
-  happy doctor            System diagnostics & troubleshooting
+  ${cli} doctor            System diagnostics & troubleshooting
 
 ${chalk.bold('Examples:')}
-  happy                    Start session
-  happy --yolo             Start with bypassing permissions
-                            happy sugar for --dangerously-skip-permissions
-  happy --chrome           Enable Chrome browser access for this session
-  happy --no-chrome        Disable Chrome even if default is on
-  happy --js-runtime bun   Use bun instead of node to spawn Claude Code
-  happy --claude-env ANTHROPIC_BASE_URL=http://127.0.0.1:3456
+  ${cli}                    Start session
+  ${cli} --yolo             Start with bypassing permissions
+                            ${cli} sugar for --dangerously-skip-permissions
+  ${cli} --chrome           Enable Chrome browser access for this session
+  ${cli} --no-chrome        Disable Chrome even if default is on
+  ${cli} --js-runtime bun   Use bun instead of node to spawn Claude Code
+  ${cli} --claude-env ANTHROPIC_BASE_URL=http://127.0.0.1:3456
                            Use a custom API endpoint (e.g., claude-code-router)
-  happy auth login --force Authenticate
-  happy doctor             Run diagnostics
+  ${cli} auth login --force Authenticate
+  ${cli} doctor             Run diagnostics
 
-${chalk.bold('Happy supports ALL Claude options!')}
-  Use any claude flag with happy as you would with claude. Our favorite:
+${chalk.bold(`${brand} supports ALL Claude options!`)}
+  Use any claude flag with ${cli} as you would with claude. Our favorite:
 
-  happy --resume
+  ${cli} --resume
 
 ${chalk.gray('─'.repeat(60))}
 ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
@@ -600,7 +605,7 @@ ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
 
     // Show version
     if (showVersion) {
-      console.log(`happy version: ${packageJson.version}`)
+      console.log(`${configuration.cliName} version: ${packageJson.version}`)
       // Don't exit - continue to pass --version to Claude Code
     }
 
@@ -610,10 +615,10 @@ ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
     } = await authAndSetupMachineIfNeeded();
 
     // Always auto-start daemon for simplicity
-    logger.debug('Ensuring Happy background service is running & matches our version...');
+    logger.debug(`Ensuring ${configuration.brandName} background service is running & matches our version...`);
 
     if (!(await isDaemonRunningCurrentlyInstalledHappyVersion())) {
-      logger.debug('Starting Happy background service...');
+      logger.debug(`Starting ${configuration.brandName} background service...`);
 
       // Use the built binary to spawn daemon
       const daemonProcess = spawnHappyCLI(['daemon', 'start-sync'], {
@@ -666,35 +671,37 @@ async function handleNotifyCommand(args: string[]): Promise<void> {
   }
 
   if (showHelp) {
+    const cli = configuration.cliName;
+    const brand = configuration.brandName;
     console.log(`
-${chalk.bold('happy notify')} - Send notification
+${chalk.bold(`${cli} notify`)} - Send notification
 
 ${chalk.bold('Usage:')}
-  happy notify -p <message> [-t <title>]    Send notification with custom message and optional title
-  happy notify -h, --help                   Show this help
+  ${cli} notify -p <message> [-t <title>]    Send notification with custom message and optional title
+  ${cli} notify -h, --help                   Show this help
 
 ${chalk.bold('Options:')}
   -p <message>    Notification message (required)
-  -t <title>      Notification title (optional, defaults to "Happy")
+  -t <title>      Notification title (optional, defaults to "${brand}")
 
 ${chalk.bold('Examples:')}
-  happy notify -p "Deployment complete!"
-  happy notify -p "System update complete" -t "Server Status"
-  happy notify -t "Alert" -p "Database connection restored"
+  ${cli} notify -p "Deployment complete!"
+  ${cli} notify -p "System update complete" -t "Server Status"
+  ${cli} notify -t "Alert" -p "Database connection restored"
 `)
     return
   }
 
   if (!message) {
     console.error(chalk.red('Error: Message is required. Use -p "your message" to specify the notification text.'))
-    console.log(chalk.gray('Run "happy notify --help" for usage information.'))
+    console.log(chalk.gray(`Run "${configuration.cliName} notify --help" for usage information.`))
     process.exit(1)
   }
 
   // Load credentials
   let credentials = await readCredentials()
   if (!credentials) {
-    console.error(chalk.red('Error: Not authenticated. Please run "happy auth login" first.'))
+    console.error(chalk.red(`Error: Not authenticated. Please run "${configuration.cliName} auth login" first.`))
     process.exit(1)
   }
 
@@ -705,7 +712,7 @@ ${chalk.bold('Examples:')}
     const api = await ApiClient.create(credentials);
 
     // Use custom title or default to "Happy"
-    const notificationTitle = title || 'Happy'
+    const notificationTitle = title || configuration.brandName
 
     // Send the push notification
     api.push().sendToAllDevices(

@@ -207,7 +207,7 @@ export async function startDaemon(): Promise<void> {
       } else if (!existingSession) {
         // New session started externally
         const trackedSession: TrackedSession = {
-          startedBy: 'happy directly - likely by user from terminal',
+          startedBy: `${configuration.cliName} directly - likely by user from terminal`,
           happySessionId: sessionId,
           happySessionMetadataFromLocalWebhook: sessionMetadata,
           pid

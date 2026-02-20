@@ -11,8 +11,9 @@
 import { existsSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
 import { logger } from '@/ui/logger';
+import { configuration } from '@/configuration';
 
-const PLIST_LABEL = 'com.happy-cli.daemon';
+const PLIST_LABEL = `com.${configuration.cliName}-cli.daemon`;
 const PLIST_FILE = `/Library/LaunchDaemons/${PLIST_LABEL}.plist`;
 
 export async function uninstall(): Promise<void> {

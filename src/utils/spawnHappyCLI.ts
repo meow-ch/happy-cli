@@ -55,6 +55,7 @@ import { projectPath } from '@/projectPath';
 import { logger } from '@/ui/logger';
 import { existsSync } from 'node:fs';
 import { isBun } from './runtime';
+import { configuration } from '@/configuration';
 
 /**
  * Spawn the Happy CLI with the given arguments in a cross-platform way.
@@ -82,7 +83,7 @@ export function spawnHappyCLI(args: string[], options: SpawnOptions = {}): Child
   // However, we log it as 'happy' here because other engineers are typically looking
   // for when "happy" was started and don't care about the underlying node process
   // details and flags we use to achieve the same result.
-  const fullCommand = `happy ${args.join(' ')}`;
+  const fullCommand = `${configuration.cliName} ${args.join(' ')}`;
   logger.debug(`[SPAWN HAPPY CLI] Spawning: ${fullCommand} in ${directory}`);
   
   // Use the same Node.js flags that the wrapper script uses

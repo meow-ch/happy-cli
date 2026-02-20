@@ -93,7 +93,7 @@ function selectAuthenticationMethod(): Promise<AuthMethod | null> {
 async function doMobileAuth(keypair: tweetnacl.BoxKeyPair): Promise<Credentials | null> {
     console.clear();
     console.log('\nMobile Authentication\n');
-    console.log('Scan this QR code with your Happy mobile app:\n');
+    console.log(`Scan this QR code with your ${configuration.brandName} mobile app:\n`);
 
     const authUrl = 'happy://terminal?' + encodeBase64Url(keypair.publicKey);
     displayQRCode(authUrl);
@@ -302,7 +302,7 @@ export async function showLinkQRCode(): Promise<void> {
     }
 
     console.log('\nLink Another Device\n');
-    console.log('Scan this QR code with your Happy mobile app:\n');
+    console.log(`Scan this QR code with your ${configuration.brandName} mobile app:\n`);
 
     const authUrl = 'happy://terminal?' + encodeBase64Url(keypair.publicKey);
     displayQRCode(authUrl);

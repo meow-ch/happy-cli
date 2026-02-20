@@ -38,3 +38,6 @@ happy-coder-*.tgz
 
 # npm auth token (never commit)
 .npmrc
+
+# Boujot-flavored local dev wrapper
+bin/boujot.mjs

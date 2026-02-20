@@ -1,5 +1,5 @@
 #!/bin/bash
-# publish-boujot.sh — Publish happy-cli as @boujot/happy-cli to npm.
+# publish-boujot.sh — Publish happy-cli as @boujot/happy-coder to npm.
 #
 # Usage: bash scripts/publish-boujot.sh [--dry-run]
 #
@@ -20,7 +20,7 @@ if [ "$1" = "--dry-run" ]; then
     echo "Dry run mode — will not publish"
 fi
 
-echo "Patching package.json for @boujot/happy-cli..."
+echo "Patching package.json for @boujot/happy-coder..."
 
 # Save original package.json
 cp package.json package.json.bak
@@ -29,7 +29,7 @@ cp package.json package.json.bak
 node -e "
 const fs = require('fs');
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-pkg.name = '@boujot/happy-cli';
+pkg.name = '@boujot/happy-coder';
 pkg.bin = { 'boujot': './bin/happy.mjs', 'boujot-mcp': './bin/happy-mcp.mjs' };
 fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
 "
@@ -37,7 +37,7 @@ fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
 echo "Building..."
 npx tsc --noEmit && npx pkgroll
 
-echo "Publishing @boujot/happy-cli..."
+echo "Publishing @boujot/happy-coder..."
 npm publish --access public $DRY_RUN
 
 # Restore original package.json

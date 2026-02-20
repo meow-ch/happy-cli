@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Rebrand script: Transforms happy-coder CLI to @boujot/cli
+ * Rebrand script: Transforms happy-coder CLI to @boujot/happy-coder
  *
  * Usage: yarn rebrand
  *
@@ -40,7 +40,7 @@
  * git reset --hard master
  * yarn rebrand
  * git add bin/ src/ package.json README.md
- * git commit -m "Apply rebrand to @boujot/cli"
+ * git commit -m "Apply rebrand to @boujot/happy-coder"
  * yarn build
  * npm publish --access public
  * git checkout master
@@ -54,7 +54,7 @@ const CLI_DIR = join(import.meta.dirname, '..');
 
 // Brand replacements
 const OLD_PACKAGE_NAME = 'happy-coder';
-const NEW_PACKAGE_NAME = '@boujot/cli';
+const NEW_PACKAGE_NAME = '@boujot/happy-coder';
 
 const OLD_BINARY = 'happy';
 const NEW_BINARY = 'boujot';
@@ -103,7 +103,7 @@ function renameFile(oldPath: string, newPath: string): void {
 }
 
 function main() {
-    console.log('\n🔄 Rebranding happy-coder → @boujot/cli\n');
+    console.log('\n🔄 Rebranding happy-coder → @boujot/happy-coder\n');
 
     // 1. Update package.json
     console.log('📦 Updating package.json...');

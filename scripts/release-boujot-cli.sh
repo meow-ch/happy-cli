@@ -186,7 +186,7 @@ fi
 cd "$REPO_ROOT"
 
 git add -A "$CLI_DIR"
-git commit -m "release: @boujot/cli $VERSION (rebrand from $BASE_BRANCH@$BASE_SHA)" >/dev/null
+git commit -m "release: @boujot/happy-coder $VERSION (rebrand from $BASE_BRANCH@$BASE_SHA)" >/dev/null
 
 echo
 echo "Release commit created on $RELEASE_BRANCH:"

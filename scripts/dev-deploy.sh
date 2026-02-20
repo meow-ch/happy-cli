@@ -13,14 +13,16 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-# Find installed @boujot package (supports both @boujot/cli and @boujot/happy-cli)
-if [ -d "/opt/homebrew/lib/node_modules/@boujot/happy-cli" ]; then
+# Find installed @boujot package (supports @boujot/happy-coder, @boujot/happy-cli, @boujot/cli)
+if [ -d "/opt/homebrew/lib/node_modules/@boujot/happy-coder" ]; then
+    INSTALL_DIR="/opt/homebrew/lib/node_modules/@boujot/happy-coder/dist"
+elif [ -d "/opt/homebrew/lib/node_modules/@boujot/happy-cli" ]; then
     INSTALL_DIR="/opt/homebrew/lib/node_modules/@boujot/happy-cli/dist"
 elif [ -d "/opt/homebrew/lib/node_modules/@boujot/cli" ]; then
     INSTALL_DIR="/opt/homebrew/lib/node_modules/@boujot/cli/dist"
 else
     echo "Error: No @boujot package found globally."
-    echo "Install it first: npm install -g @boujot/happy-cli"
+    echo "Install it first: npm install -g @boujot/happy-coder"
     exit 1
 fi
 

@@ -62,8 +62,11 @@ class Configuration {
     this.brandName = this.flavor === 'boujot' ? 'Boujot' : 'Happy'
     this.configDirName = this.flavor === 'boujot' ? '.boujot' : '.happy'
 
-    // Server configuration - priority: parameter > environment > default
-    this.serverUrl = process.env.HAPPY_SERVER_URL || 'https://api.cluster-fluster.com'
+    // Server configuration — required, no fallback default
+    if (!process.env.HAPPY_SERVER_URL) {
+      throw new Error('HAPPY_SERVER_URL environment variable is required')
+    }
+    this.serverUrl = process.env.HAPPY_SERVER_URL
     this.webappUrl = process.env.HAPPY_WEBAPP_URL || 'https://app.happy.engineering'
 
     // Check if we're running as daemon based on process args

@@ -24,13 +24,13 @@ const VARIANTS = {
     homeDir: path.join(os.homedir(), '.happy'),
     color: '\x1b[32m', // Green
     label: '✅ STABLE',
-    serverUrl: process.env.HAPPY_SERVER_URL || 'https://api.cluster-fluster.com'
+    serverUrl: (() => { if (!process.env.HAPPY_SERVER_URL) throw new Error('HAPPY_SERVER_URL environment variable is required'); return process.env.HAPPY_SERVER_URL; })()
   },
   dev: {
     homeDir: path.join(os.homedir(), '.happy-dev'),
     color: '\x1b[33m', // Yellow
     label: '🔧 DEV',
-    serverUrl: process.env.HAPPY_SERVER_URL || 'https://api.cluster-fluster.com'
+    serverUrl: (() => { if (!process.env.HAPPY_SERVER_URL) throw new Error('HAPPY_SERVER_URL environment variable is required'); return process.env.HAPPY_SERVER_URL; })()
   }
 };
 

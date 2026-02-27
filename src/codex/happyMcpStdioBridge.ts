@@ -108,6 +108,7 @@ async function main() {
   };
 
   // Register primary tool name used in our MCP prompts.
+  // @ts-expect-error MCP SDK Zod type mismatch — runtime behavior is correct
   server.registerTool('change_title', changeTitleToolSchema, changeTitleToolHandler);
   // Some MCP tool routers escape underscores as double-underscores in composite names.
   // Register an alias so calls to `mcp__happy__change__title` can still resolve.

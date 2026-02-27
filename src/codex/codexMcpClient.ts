@@ -72,6 +72,7 @@ export class CodexMcpClient {
             { capabilities: { elicitation: {} } }
         );
 
+        // @ts-expect-error MCP SDK Zod type mismatch — runtime behavior is correct
         this.client.setNotificationHandler(z.object({
             method: z.literal('codex/event'),
             params: z.object({

@@ -46,7 +46,8 @@ export async function startHappyServer(client: ApiSessionClient) {
         inputSchema: z.object({
             title: z.string().describe('The new title for the chat session'),
         }),
-    }, async (args) => {
+    // @ts-ignore MCP SDK Zod deep instantiation — runtime behavior is correct
+    }, async (args: { title: string }) => {
         const response = await handler(args.title);
         logger.debug('[happyMCP] Response:', response);
         

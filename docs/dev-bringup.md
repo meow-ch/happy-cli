@@ -4,7 +4,7 @@ How to get everything running for local testing.
 
 ## Components
 
-### Backend Server (`https://happy.zivili.ch`)
+### Backend Server (set via `HAPPY_SERVER_URL`)
 
 - System of record for accounts, sessions, messages, and machines.
 - Both the mobile app and the CLI/daemon connect to it (HTTP plus realtime updates).

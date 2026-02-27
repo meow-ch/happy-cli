@@ -2,7 +2,7 @@
 
 The Boujot iOS app shows "machines" by calling the backend:
 
-- `GET https://happy.zivili.ch/v1/machines`
+- `GET <HAPPY_SERVER_URL>/v1/machines`
 
 If that endpoint returns an empty list for your account, the app will show "No machines" and it will block sending messages until you select one.
 
@@ -31,7 +31,7 @@ On your Mac:
 
 On your iPhone:
 
-1. Make sure the app is pointing at the correct server (`https://happy.zivili.ch`) in Settings (Server Configuration).
+1. Make sure the app is pointing at the correct server in Settings (Server Configuration).
 2. Go back to the New Session screen (or restart the app) so it refetches machines.
 
 ## Troubleshooting
@@ -76,12 +76,12 @@ Fix:
 
 ### Network/DNS Issues On The Mac
 
-If the daemon can't reach `https://happy.zivili.ch`, it can't register the machine.
+If the daemon can't reach your server (`HAPPY_SERVER_URL`), it can't register the machine.
 
 Quick check:
 
 ```bash
-curl -sS https://happy.zivili.ch/v1/version | head
+curl -sS $HAPPY_SERVER_URL/v1/version | head
 ```
 
 If that fails, fix network/DNS first, then restart the daemon.

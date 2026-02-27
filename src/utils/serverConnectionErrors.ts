@@ -324,6 +324,7 @@ class OfflineState {
             })
             .join('; ');
         console.log(`⚠️  Happy server unreachable, offline mode with auto-reconnect enabled - error details: ${summary}`);
+        console.log(chalk.yellow(`   → Server URL: ${configuration.serverUrl} (set via HAPPY_SERVER_URL environment variable)`));
 
         // Print detail lines if present - consistent 3-space indent with arrow
         const allDetails = [...this.failures.values()]

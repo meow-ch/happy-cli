@@ -10,7 +10,7 @@ What it does:
   - Requires a clean git working tree
   - Creates a release branch from current HEAD:
       boujot-cli-release/<version>
-  - Bumps packages/happy-cli/package.json version to <version>
+  - Bumps package.json version to <version>
   - Runs: yarn rebrand
   - Optionally runs: npm run build, npm test
   - Commits the rebrand output with a traceable message
@@ -22,7 +22,7 @@ Notes:
   - For publishing, ensure you're authenticated to npm (e.g. `npm whoami`) or provide a token:
     - NPM_TOKEN (preferred)
     - NPM_GRANULAR_ACCESS_TOKEN (will be mapped to NPM_TOKEN)
-    - If packages/happy-cli/.env contains NPM_GRANULAR_ACCESS_TOKEN=..., this script will read it.
+    - If .env contains NPM_GRANULAR_ACCESS_TOKEN=..., this script will read it.
 EOF
 }
 
@@ -76,14 +76,7 @@ if [[ "$TAG" != "beta" && "$TAG" != "latest" ]]; then
 fi
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-CLI_DIR="$REPO_ROOT/packages/happy-cli"
-
-if [[ ! -d "$CLI_DIR" ]]; then
-  echo "Expected CLI dir at: $CLI_DIR" >&2
-  exit 1
-fi
-
-cd "$REPO_ROOT"
+CLI_DIR="$REPO_ROOT"
 
 read_dotenv_value() {
   # Read KEY=VALUE from a dotenv-like file without executing it.
@@ -182,8 +175,6 @@ if [[ "$SKIP_TEST" != "1" ]]; then
 else
   echo "Skipping tests."
 fi
-
-cd "$REPO_ROOT"
 
 git add -A "$CLI_DIR"
 git commit -m "release: @boujot/happy-coder $VERSION (rebrand from $BASE_BRANCH@$BASE_SHA)" >/dev/null

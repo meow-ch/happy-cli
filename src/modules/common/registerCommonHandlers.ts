@@ -7,6 +7,7 @@ import { join } from 'path';
 import { run as runRipgrep } from '@/modules/ripgrep/index';
 import { run as runDifftastic } from '@/modules/difftastic/index';
 import { codexModelList, type CodexModelInfo } from '@/codex/codexModelList';
+import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { RpcHandlerManager } from '../../api/rpc/RpcHandlerManager';
 import { validatePath } from './pathSecurity';
 
@@ -115,6 +116,10 @@ interface CodexModelsListResponse {
     success: boolean;
     models?: CodexModelInfo[];
     error?: string;
+}
+
+interface CodexModelsListRequest {
+    environmentVariables?: Record<string, string>;
 }
 
 /*
@@ -528,9 +533,12 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
     });
 
     // Codex models list handler - dynamic model discovery from local Codex CLI.
-    rpcHandlerManager.registerHandler<{}, CodexModelsListResponse>('codex-models-list', async () => {
+    rpcHandlerManager.registerHandler<CodexModelsListRequest, CodexModelsListResponse>('codex-models-list', async (data) => {
         try {
-            const models = await codexModelList({ timeoutMs: 10_000 });
+            const env = data?.environmentVariables
+                ? expandEnvironmentVariables(data.environmentVariables, process.env)
+                : undefined;
+            const models = await codexModelList({ timeoutMs: 10_000, env });
             return { success: true, models };
         } catch (error) {
             return { success: false, error: error instanceof Error ? error.message : 'Failed to list Codex models' };

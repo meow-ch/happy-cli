@@ -56,13 +56,13 @@ async function rpcCall(
  * This is used by the daemon's RPC so the mobile app can show a machine-specific
  * model picker that stays in sync with Codex as the available models change.
  */
-export async function codexModelList(opts?: { timeoutMs?: number }): Promise<CodexModelInfo[]> {
+export async function codexModelList(opts?: { timeoutMs?: number; env?: Record<string, string> }): Promise<CodexModelInfo[]> {
     const timeoutMs = opts?.timeoutMs ?? 8_000;
 
     // Codex app-server speaks newline-delimited JSON-RPC over stdio.
     const proc = spawn('codex', ['app-server', '--listen', 'stdio://'], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: process.env,
+        env: { ...process.env, ...opts?.env },
     });
 
     const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
@@ -77,17 +77,29 @@ export async function codexModelList(opts?: { timeoutMs?: number }): Promise<Cod
         }
     };
 
-    const timer = setTimeout(() => {
+    const rejectPending = (error: Error) => {
         for (const [, p] of pending) {
-            p.reject(new Error('Timed out while listing Codex models'));
+            p.reject(error);
         }
         pending.clear();
+    };
+
+    const timer = setTimeout(() => {
+        rejectPending(new Error('Timed out while listing Codex models'));
         kill();
     }, timeoutMs);
 
     proc.on('error', (e) => {
-        for (const [, p] of pending) p.reject(e instanceof Error ? e : new Error(asErrorMessage(e)));
-        pending.clear();
+        rejectPending(e instanceof Error ? e : new Error(asErrorMessage(e)));
+    });
+
+    proc.on('exit', (code, signal) => {
+        if (pending.size === 0) return;
+
+        const detail = signal
+            ? `signal ${signal}`
+            : `exit code ${code ?? 'unknown'}`;
+        rejectPending(new Error(`Codex app-server exited while listing models (${detail})`));
     });
 
     proc.stderr.on('data', (d) => {
@@ -171,4 +183,3 @@ export async function codexModelList(opts?: { timeoutMs?: number }): Promise<Cod
         kill();
     }
 }
-

@@ -7,6 +7,7 @@ import { join } from 'path';
 import { run as runRipgrep } from '@/modules/ripgrep/index';
 import { run as runDifftastic } from '@/modules/difftastic/index';
 import { codexModelList, type CodexModelInfo } from '@/codex/codexModelList';
+import { claudeModelList, type ClaudeModelInfo } from '@/claude/claudeModelList';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { RpcHandlerManager } from '../../api/rpc/RpcHandlerManager';
 import { validatePath } from './pathSecurity';
@@ -119,6 +120,16 @@ interface CodexModelsListResponse {
 }
 
 interface CodexModelsListRequest {
+    environmentVariables?: Record<string, string>;
+}
+
+interface ClaudeModelsListResponse {
+    success: boolean;
+    models?: ClaudeModelInfo[];
+    error?: string;
+}
+
+interface ClaudeModelsListRequest {
     environmentVariables?: Record<string, string>;
 }
 
@@ -542,6 +553,19 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
             return { success: true, models };
         } catch (error) {
             return { success: false, error: error instanceof Error ? error.message : 'Failed to list Codex models' };
+        }
+    });
+
+    // Claude models list handler - gateway discovery plus Claude Code alias fallback.
+    rpcHandlerManager.registerHandler<ClaudeModelsListRequest, ClaudeModelsListResponse>('claude-models-list', async (data) => {
+        try {
+            const env = data?.environmentVariables
+                ? expandEnvironmentVariables(data.environmentVariables, process.env)
+                : undefined;
+            const models = await claudeModelList({ timeoutMs: 10_000, env });
+            return { success: true, models };
+        } catch (error) {
+            return { success: false, error: error instanceof Error ? error.message : 'Failed to list Claude models' };
         }
     });
 }

@@ -5,10 +5,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mockState = vi.hoisted(() => ({
     spawn: vi.fn(),
     processes: [] as FakeCodexProcess[],
+    readFile: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({
     spawn: mockState.spawn,
+}));
+
+vi.mock('node:fs', () => ({
+    promises: {
+        readFile: mockState.readFile,
+    },
 }));
 
 import { codexModelList } from '../codexModelList';
@@ -58,6 +65,17 @@ async function waitForRequests(proc: FakeCodexProcess, count: number) {
     }
 }
 
+async function waitForSpawn(): Promise<FakeCodexProcess> {
+    const deadline = Date.now() + 500;
+    while (mockState.processes.length === 0) {
+        if (Date.now() > deadline) {
+            throw new Error('Timed out waiting for codex app-server spawn');
+        }
+        await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    return mockState.processes[0];
+}
+
 describe('codexModelList', () => {
     beforeEach(() => {
         mockState.processes.length = 0;
@@ -66,6 +84,67 @@ describe('codexModelList', () => {
             mockState.processes.push(proc);
             return proc;
         });
+        // Default to "cache file missing" so the existing app-server fallback
+        // tests still exercise the spawn path. The cache-hit case has its own
+        // dedicated test below.
+        mockState.readFile.mockReset();
+        mockState.readFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+    });
+
+    it('reads ~/.codex/models_cache.json as the primary source (matching `codex /model`)', async () => {
+        mockState.readFile.mockResolvedValueOnce(JSON.stringify({
+            models: [
+                {
+                    slug: 'gpt-5.5',
+                    display_name: 'GPT-5.5',
+                    description: 'Frontier model',
+                    priority: 0,
+                    visibility: 'list',
+                    default_reasoning_level: 'medium',
+                    supported_reasoning_levels: [
+                        { effort: 'low', description: 'Fast' },
+                        { effort: 'medium', description: 'Balanced' },
+                    ],
+                },
+                {
+                    slug: 'gpt-5.4',
+                    display_name: 'gpt-5.4',
+                    description: 'Strong everyday',
+                    priority: 2,
+                    visibility: 'list',
+                },
+                {
+                    slug: 'gpt-5.3-codex',
+                    display_name: 'gpt-5.3-codex',
+                    priority: 6,
+                    visibility: 'list',
+                },
+                {
+                    slug: 'hidden-internal',
+                    visibility: 'hidden',
+                    priority: 1,
+                },
+            ],
+        }));
+
+        const models = await codexModelList();
+
+        // app-server is NOT spawned when the cache hits.
+        expect(mockState.spawn).not.toHaveBeenCalled();
+
+        // Visibility=hidden is filtered out; remaining three are priority-sorted.
+        expect(models.map(m => m.model)).toEqual(['gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex']);
+
+        // First (lowest priority) is marked default.
+        expect(models[0].isDefault).toBe(true);
+        expect(models[1].isDefault).toBeUndefined();
+
+        // Reasoning levels are remapped from snake_case to the wire shape.
+        expect(models[0].defaultReasoningEffort).toBe('medium');
+        expect(models[0].supportedReasoningEfforts).toEqual([
+            { reasoningEffort: 'low', description: 'Fast' },
+            { reasoningEffort: 'medium', description: 'Balanced' },
+        ]);
     });
 
     it('initializes app-server, paginates model/list, and merges env overrides', async () => {
@@ -74,7 +153,7 @@ describe('codexModelList', () => {
             env: { CODEX_MODEL_LIST_TEST: '1' },
         });
 
-        const proc = mockState.processes[0];
+        const proc = await waitForSpawn();
         expect(mockState.spawn).toHaveBeenCalledWith(
             'codex',
             ['app-server', '--listen', 'stdio://'],
@@ -122,7 +201,7 @@ describe('codexModelList', () => {
     it('rejects pending RPCs immediately when app-server exits early', async () => {
         const resultPromise = codexModelList({ timeoutMs: 1_000 });
 
-        const proc = mockState.processes[0];
+        const proc = await waitForSpawn();
         await waitForRequests(proc, 1);
         proc.stderr.write('config missing');
         proc.emit('exit', 1, null);

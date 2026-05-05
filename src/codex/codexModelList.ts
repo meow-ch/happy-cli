@@ -1,5 +1,8 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { promises as fs } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 type JsonRpcRequest = {
     jsonrpc: '2.0';
@@ -36,6 +39,81 @@ function asErrorMessage(error: unknown): string {
     return String(error ?? 'Unknown error');
 }
 
+const CODEX_MODELS_CACHE_PATH = join(homedir(), '.codex', 'models_cache.json');
+
+interface CodexCachedReasoningLevel {
+    effort?: string;
+    description?: string;
+}
+
+interface CodexCachedModel {
+    slug?: string;
+    display_name?: string;
+    description?: string;
+    priority?: number;
+    visibility?: string;
+    upgrade?: string | null;
+    default_reasoning_level?: string | null;
+    supported_reasoning_levels?: CodexCachedReasoningLevel[];
+}
+
+interface CodexModelsCacheFile {
+    models?: CodexCachedModel[];
+}
+
+function mapCachedModel(raw: CodexCachedModel): CodexModelInfo | null {
+    if (!raw || typeof raw.slug !== 'string' || !raw.slug) return null;
+    const efforts: CodexReasoningEffortOption[] = Array.isArray(raw.supported_reasoning_levels)
+        ? raw.supported_reasoning_levels
+            .filter((e): e is CodexCachedReasoningLevel => !!e && typeof e.effort === 'string')
+            .map((e) => ({
+                reasoningEffort: e.effort!,
+                description: e.description,
+            }))
+        : [];
+    return {
+        model: raw.slug,
+        displayName: typeof raw.display_name === 'string' ? raw.display_name : undefined,
+        description: typeof raw.description === 'string' ? raw.description : undefined,
+        upgrade: raw.upgrade ?? null,
+        defaultReasoningEffort: raw.default_reasoning_level ?? null,
+        supportedReasoningEfforts: efforts.length > 0 ? efforts : undefined,
+    };
+}
+
+async function readCodexModelsCache(): Promise<CodexModelInfo[] | null> {
+    let raw: string;
+    try {
+        raw = await fs.readFile(CODEX_MODELS_CACHE_PATH, 'utf8');
+    } catch {
+        return null;
+    }
+    let parsed: CodexModelsCacheFile;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        return null;
+    }
+    if (!parsed || !Array.isArray(parsed.models)) return null;
+
+    const visible = parsed.models
+        .filter((m) => m && (m.visibility === undefined || m.visibility === 'list'));
+
+    const ordered = visible
+        .map((m) => ({ priority: typeof m.priority === 'number' ? m.priority : Number.MAX_SAFE_INTEGER, model: m }))
+        .sort((a, b) => a.priority - b.priority)
+        .map((entry) => entry.model);
+
+    const mapped: CodexModelInfo[] = [];
+    for (const m of ordered) {
+        const info = mapCachedModel(m);
+        if (info) mapped.push(info);
+    }
+    if (mapped.length === 0) return null;
+    mapped[0].isDefault = true;
+    return mapped;
+}
+
 async function rpcCall(
     proc: ReturnType<typeof spawn>,
     pending: Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>,
@@ -51,12 +129,24 @@ async function rpcCall(
 }
 
 /**
- * List models from the local `codex` CLI via `codex app-server --listen stdio://`.
+ * List models from the local `codex` CLI.
  *
- * This is used by the daemon's RPC so the mobile app can show a machine-specific
- * model picker that stays in sync with Codex as the available models change.
+ * Primary source: `~/.codex/models_cache.json` — this is the same file the
+ * interactive `codex /model` selector reads, so the picker matches `/model`
+ * exactly (including new entries like gpt-5.5 that don't have a structured
+ * config in app-server's `model/list` RPC yet).
+ *
+ * Fallback: spawn `codex app-server --listen stdio://` and call `model/list`
+ * for hosts where the cache file is missing (fresh codex install, custom
+ * codex_home dir, or future versions that move the cache).
  */
 export async function codexModelList(opts?: { timeoutMs?: number; env?: Record<string, string> }): Promise<CodexModelInfo[]> {
+    const cached = await readCodexModelsCache();
+    if (cached && cached.length > 0) return cached;
+    return await codexModelListViaAppServer(opts);
+}
+
+async function codexModelListViaAppServer(opts?: { timeoutMs?: number; env?: Record<string, string> }): Promise<CodexModelInfo[]> {
     const timeoutMs = opts?.timeoutMs ?? 8_000;
 
     // Codex app-server speaks newline-delimited JSON-RPC over stdio.

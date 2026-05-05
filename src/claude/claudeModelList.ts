@@ -1,9 +1,21 @@
+import { query } from '@/claude/sdk/query';
+import type { SDKSystemMessage } from '@/claude/sdk/types';
+import { logger } from '@/ui/logger';
+
+export interface ClaudeEffortOption {
+    id: string;
+    label: string;
+    description?: string;
+    isDefault?: boolean;
+}
+
 export interface ClaudeModelInfo {
     model: string;
     displayName?: string;
     description?: string;
     isDefault?: boolean;
-    source?: 'builtin' | 'gateway' | 'custom';
+    source?: 'builtin' | 'gateway' | 'custom' | 'cli';
+    efforts?: ClaudeEffortOption[];
 }
 
 type ClaudeModelListOptions = {
@@ -12,47 +24,143 @@ type ClaudeModelListOptions = {
 };
 
 const DEFAULT_TIMEOUT_MS = 8_000;
+const PROBE_TIMEOUT_MS = 6_000;
+
+// Aliases the picker exposes. Mirrors `claude /model`'s 3-row shape — Opus is
+// intentionally absent because Default already resolves to the latest Opus
+// model (`claude /model` shows it as a single "Default (recommended) ✓" row,
+// not a separate Opus entry).
+const PROBE_ALIASES: ReadonlyArray<{ alias: string; description: string }> = [
+    { alias: 'default', description: 'Most capable for complex work' },
+    { alias: 'sonnet', description: 'Best for everyday tasks' },
+    { alias: 'haiku', description: 'Fastest for quick answers' },
+];
+
+// Effort levels accepted by `claude --effort` (see `claude --help`). xhigh is
+// the current default — confirmed against `/model`'s "xHigh effort (default)"
+// indicator. Listed in user-facing order (low → max).
+const CLAUDE_EFFORTS: ReadonlyArray<ClaudeEffortOption> = [
+    { id: 'low', label: 'Low', description: 'Faster, lighter reasoning' },
+    { id: 'medium', label: 'Medium', description: 'Balanced reasoning depth' },
+    { id: 'high', label: 'High', description: 'Greater reasoning depth' },
+    { id: 'xhigh', label: 'xHigh', description: 'Extra-high reasoning depth', isDefault: true },
+    { id: 'max', label: 'Max', description: 'Maximum reasoning depth' },
+];
 
 function envValue(env: Record<string, string | undefined>, key: string): string | undefined {
     const value = env[key]?.trim();
     return value ? value : undefined;
 }
 
-function buildBuiltinModels(env: Record<string, string | undefined>): ClaudeModelInfo[] {
-    const profileModel = envValue(env, 'ANTHROPIC_MODEL');
-    const opusModel = envValue(env, 'ANTHROPIC_DEFAULT_OPUS_MODEL');
-    const sonnetModel = envValue(env, 'ANTHROPIC_DEFAULT_SONNET_MODEL');
-    const haikuModel = envValue(env, 'ANTHROPIC_DEFAULT_HAIKU_MODEL');
+/**
+ * Render a Claude model ID into the human label `claude /model` shows.
+ *
+ * Examples:
+ *   claude-opus-4-7[1m]   -> "Opus 4.7 with 1M context"
+ *   claude-sonnet-4-6     -> "Sonnet 4.6"
+ *   claude-haiku-4-5      -> "Haiku 4.5"
+ *
+ * Falls back to the raw id when the pattern doesn't match (e.g. third-party
+ * gateway models, future model families).
+ */
+function formatClaudeDisplayName(modelId: string): string {
+    const m = modelId.match(/^claude-(opus|sonnet|haiku)-(\d+)-(\d+)(?:\[(\d+)([kmg])\])?/i);
+    if (!m) return modelId;
+    const family = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+    const version = `${m[2]}.${m[3]}`;
+    const ctx = m[4] && m[5] ? ` with ${m[4]}${m[5].toUpperCase()} context` : '';
+    return `${family} ${version}${ctx}`;
+}
 
-    return [
-        {
-            model: 'default',
-            displayName: 'Default (recommended)',
-            description: profileModel
-                ? `${profileModel} · Profile default`
-                : 'Use Claude Code\'s recommended default model',
-            isDefault: true,
-            source: 'builtin',
-        },
-        {
-            model: 'opus',
-            displayName: 'Opus',
-            description: opusModel ? `${opusModel} · Most capable` : 'Most capable for complex work',
-            source: 'builtin',
-        },
-        {
-            model: 'sonnet',
-            displayName: 'Sonnet',
-            description: sonnetModel ? `${sonnetModel} · Best everyday model` : 'Best for everyday tasks',
-            source: 'builtin',
-        },
-        {
-            model: 'haiku',
-            displayName: 'Haiku',
-            description: haikuModel ? `${haikuModel} · Fastest` : 'Fastest for quick answers',
-            source: 'builtin',
-        },
-    ];
+/**
+ * Spawn a Claude SDK query just long enough to capture the system/init
+ * message — that message contains the resolved model ID for whichever alias
+ * we passed via --model. Aborts immediately after init, so no API tokens are
+ * spent. Returns null on any failure (timeout, missing claude binary, login
+ * issue) so callers can fall back gracefully.
+ */
+async function probeAliasModel(alias: string, timeoutMs: number): Promise<string | null> {
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), timeoutMs);
+    try {
+        const sdkQuery = query({
+            prompt: 'noop',
+            options: {
+                model: alias,
+                allowedTools: [],
+                maxTurns: 1,
+                abort: abortController.signal,
+            },
+        });
+        for await (const message of sdkQuery) {
+            if (message.type === 'system' && message.subtype === 'init') {
+                const sys = message as SDKSystemMessage;
+                abortController.abort();
+                return typeof sys.model === 'string' ? sys.model : null;
+            }
+        }
+        return null;
+    } catch (error) {
+        if (error instanceof Error && (error.name === 'AbortError' || (error as NodeJS.ErrnoException).code === 'ABORT_ERR')) {
+            return null;
+        }
+        logger.debug(`[claudeModelList] probe failed for alias ${alias}:`, error);
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * Build the picker rows from SDK probes — the same shape `claude /model`
+ * shows. Returns null if probing didn't yield anything usable so callers can
+ * try the gateway path or fall back to a static list.
+ */
+async function buildFromCliProbes(timeoutMs: number): Promise<ClaudeModelInfo[] | null> {
+    const probes = await Promise.all(
+        PROBE_ALIASES.map(async ({ alias, description }) => {
+            const resolved = await probeAliasModel(alias, timeoutMs);
+            return { alias, description, resolved };
+        })
+    );
+
+    const successful = probes.filter((p) => !!p.resolved);
+    if (successful.length === 0) return null;
+
+    const results: ClaudeModelInfo[] = successful.map(({ alias, description, resolved }, index) => {
+        const versionLabel = formatClaudeDisplayName(resolved!);
+        return {
+            model: alias,
+            displayName: alias === 'default'
+                ? 'Default (recommended)'
+                : alias.charAt(0).toUpperCase() + alias.slice(1),
+            description: `${versionLabel} · ${description}`,
+            isDefault: alias === 'default' || (index === 0 && !successful.some((p) => p.alias === 'default')),
+            source: 'cli',
+            efforts: CLAUDE_EFFORTS.map((e) => ({ ...e })),
+        };
+    });
+
+    return results;
+}
+
+/**
+ * Last-resort static rows when neither SDK probes nor a configured gateway
+ * yields a list. Matches `/model`'s shape (3 rows, Default+Sonnet+Haiku) but
+ * with generic descriptions — the picker will look right but won't show the
+ * current model version.
+ */
+function buildStaticFallback(): ClaudeModelInfo[] {
+    return PROBE_ALIASES.map(({ alias, description }) => ({
+        model: alias,
+        displayName: alias === 'default'
+            ? 'Default (recommended)'
+            : alias.charAt(0).toUpperCase() + alias.slice(1),
+        description,
+        isDefault: alias === 'default',
+        source: 'builtin',
+        efforts: CLAUDE_EFFORTS.map((e) => ({ ...e })),
+    }));
 }
 
 function normalizeBaseUrl(baseUrl: string): string {
@@ -134,111 +242,48 @@ function normalizeModelInfo(raw: unknown): ClaudeModelInfo | null {
     };
 }
 
-function isDiscoverableClaudeModel(model: string): boolean {
-    const lower = model.toLowerCase();
-    return lower.startsWith('claude') || lower.startsWith('anthropic');
-}
-
-function addCustomModel(models: ClaudeModelInfo[], model: string | undefined, displayName?: string, description?: string) {
-    const value = model?.trim();
-    if (!value) return;
-    models.push({
-        model: value,
-        displayName: displayName || value,
-        description,
-        source: 'custom',
-    });
-}
-
-function addCustomModelOptions(models: ClaudeModelInfo[], env: Record<string, string | undefined>) {
-    addCustomModel(
-        models,
-        envValue(env, 'ANTHROPIC_MODEL'),
-        envValue(env, 'ANTHROPIC_MODEL_NAME'),
-        envValue(env, 'ANTHROPIC_MODEL_DESCRIPTION') || 'Profile model'
-    );
-    addCustomModel(
-        models,
-        envValue(env, 'ANTHROPIC_SMALL_FAST_MODEL'),
-        envValue(env, 'ANTHROPIC_SMALL_FAST_MODEL_NAME'),
-        envValue(env, 'ANTHROPIC_SMALL_FAST_MODEL_DESCRIPTION') || 'Profile small/fast model'
-    );
-    addCustomModel(
-        models,
-        envValue(env, 'ANTHROPIC_CUSTOM_MODEL_OPTION'),
-        envValue(env, 'ANTHROPIC_CUSTOM_MODEL_OPTION_NAME'),
-        envValue(env, 'ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION') || 'Custom Claude Code model option'
-    );
-}
-
-function dedupeModels(models: ClaudeModelInfo[]): ClaudeModelInfo[] {
-    const byModel = new Map<string, ClaudeModelInfo>();
-    for (const model of models) {
-        if (!model.model) continue;
-        if (!byModel.has(model.model)) {
-            byModel.set(model.model, model);
-            continue;
-        }
-
-        const existing = byModel.get(model.model)!;
-        byModel.set(model.model, {
-            ...existing,
-            ...model,
-            isDefault: existing.isDefault || model.isDefault,
-            description: model.description || existing.description,
-            displayName: model.displayName || existing.displayName,
-        });
-    }
-    return [...byModel.values()];
-}
-
-async function fetchJsonWithTimeout(url: URL, headers: Record<string, string>, timeoutMs: number): Promise<unknown> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-        const response = await fetch(url, {
-            headers,
-            signal: controller.signal,
-        });
-        const text = await response.text();
-        if (!response.ok) {
-            const detail = text.trim() ? `: ${text.trim().slice(0, 500)}` : '';
-            throw new Error(`Claude models endpoint returned HTTP ${response.status}${detail}`);
-        }
-
-        try {
-            return JSON.parse(text);
-        } catch (error) {
-            throw new Error(`Claude models endpoint returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    } finally {
-        clearTimeout(timer);
-    }
+function isClaudeModelId(id: string): boolean {
+    return /^(claude|anthropic\.|deepseek-|glm-)/i.test(id);
 }
 
 async function fetchGatewayModels(
     baseUrl: string,
     env: Record<string, string | undefined>,
-    timeoutMs: number
+    timeoutMs: number,
 ): Promise<ClaudeModelInfo[]> {
     const headers = buildHeaders(env);
+    const normalizedBase = normalizeBaseUrl(baseUrl);
     const models: ClaudeModelInfo[] = [];
-    let afterId: string | null = null;
+    let afterId: string | undefined;
+    const seen = new Set<string>();
 
-    for (let page = 0; page < 20; page++) {
-        const url = new URL(`${normalizeBaseUrl(baseUrl)}/v1/models`);
+    while (true) {
+        const url = new URL(`${normalizedBase}/v1/models`);
         url.searchParams.set('limit', '1000');
         if (afterId) url.searchParams.set('after_id', afterId);
 
-        const body = await fetchJsonWithTimeout(url, headers, timeoutMs);
-        const data = (body as { data?: unknown })?.data;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        let response: Response;
+        try {
+            response = await fetch(url, { headers, signal: controller.signal });
+        } finally {
+            clearTimeout(timer);
+        }
+
+        if (!response.ok) {
+            throw new Error(`Anthropic /v1/models returned ${response.status}`);
+        }
+
+        const body = await response.json();
+        const data = (body as { data?: unknown }).data;
         if (Array.isArray(data)) {
-            for (const item of data) {
-                const model = normalizeModelInfo(item);
-                if (model && isDiscoverableClaudeModel(model.model)) {
-                    models.push(model);
-                }
+            for (const raw of data) {
+                const model = normalizeModelInfo(raw);
+                if (!model || seen.has(model.model)) continue;
+                if (!isClaudeModelId(model.model)) continue;
+                seen.add(model.model);
+                models.push(model);
             }
         }
 
@@ -254,38 +299,40 @@ async function fetchGatewayModels(
 }
 
 /**
- * List Claude models for the selected profile.
+ * List Claude models for the picker.
  *
- * Claude Code does not expose a machine-readable CLI equivalent of `/model`.
- * For Anthropic-compatible gateways it discovers models from `/v1/models`;
- * otherwise we return Claude Code aliases plus any pinned profile models.
+ * Source priority:
+ *   1. SDK probes — spawn `claude --model <alias>` with allowedTools=[] and
+ *      capture system/init for each alias (default, sonnet, haiku). This
+ *      mirrors `claude /model`'s shape (3 rows, version-aware descriptions,
+ *      effort selector). Costs nothing — abort fires before any API call.
+ *   2. Gateway `/v1/models` — only when `ANTHROPIC_BASE_URL` is set OR a
+ *      literal `ANTHROPIC_API_KEY` is provided. For Bedrock/Vertex/proxies
+ *      where the SDK's own list isn't authoritative.
+ *   3. Static fallback — 3-row shape with generic descriptions, used only
+ *      when both 1 and 2 fail.
  */
 export async function claudeModelList(opts?: ClaudeModelListOptions): Promise<ClaudeModelInfo[]> {
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const env: Record<string, string | undefined> = { ...process.env, ...opts?.env };
 
-    const models: ClaudeModelInfo[] = [
-        ...buildBuiltinModels(env),
-    ];
-    addCustomModelOptions(models, env);
+    const probed = await buildFromCliProbes(Math.min(timeoutMs, PROBE_TIMEOUT_MS));
+    if (probed && probed.length > 0) return probed;
 
     const baseUrl = envValue(env, 'ANTHROPIC_BASE_URL');
-    const hasApiKey = !!envValue(env, 'ANTHROPIC_API_KEY');
-    const discoveryBaseUrl = baseUrl || (hasApiKey ? 'https://api.anthropic.com' : undefined);
+    const explicitApiKey = !!envValue(env, 'ANTHROPIC_API_KEY');
+    const discoveryBaseUrl = baseUrl || (explicitApiKey ? 'https://api.anthropic.com' : undefined);
 
-    if (!discoveryBaseUrl) {
-        return dedupeModels(models);
+    if (discoveryBaseUrl) {
+        try {
+            const gatewayModels = await fetchGatewayModels(discoveryBaseUrl, env, timeoutMs);
+            if (gatewayModels.length > 0) {
+                return gatewayModels.sort((a, b) => a.model.localeCompare(b.model));
+            }
+        } catch (error) {
+            logger.debug('[claudeModelList] gateway discovery failed:', error);
+        }
     }
 
-    try {
-        const gatewayModels = await fetchGatewayModels(discoveryBaseUrl, env, timeoutMs);
-        return dedupeModels([
-            ...models,
-            ...gatewayModels.sort((a, b) => a.model.localeCompare(b.model)),
-        ]);
-    } catch {
-        // Model discovery is best-effort. Claude Code itself can still accept aliases
-        // or pinned profile models when a gateway does not expose /v1/models.
-        return dedupeModels(models);
-    }
+    return buildStaticFallback();
 }

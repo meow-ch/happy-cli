@@ -1,4 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const queryMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@/claude/sdk/query', () => ({
+    query: queryMock,
+}));
+
+vi.mock('@/ui/logger', () => ({
+    logger: {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+    },
+}));
+
 import { claudeModelList } from '../claudeModelList';
 
 const envKeys = [
@@ -16,12 +32,30 @@ function jsonResponse(body: unknown, status = 200) {
     return {
         ok: status >= 200 && status < 300,
         status,
+        json: vi.fn(async () => body),
         text: vi.fn(async () => JSON.stringify(body)),
     };
 }
 
+function mockProbeResponses(responses: Record<string, string | null>) {
+    queryMock.mockImplementation(({ options }: { options: { model: string } }) => {
+        const resolved = responses[options.model];
+        return (async function* () {
+            if (resolved === null) {
+                throw new Error(`probe failed for ${options.model}`);
+            }
+            yield {
+                type: 'system',
+                subtype: 'init',
+                model: resolved,
+            } as any;
+        })();
+    });
+}
+
 describe('claudeModelList', () => {
     beforeEach(() => {
+        queryMock.mockReset();
         for (const key of envKeys) {
             originalEnv.set(key, process.env[key]);
             delete process.env[key];
@@ -41,32 +75,35 @@ describe('claudeModelList', () => {
         originalEnv.clear();
     });
 
-    it('returns Claude Code aliases and pinned profile models without a gateway', async () => {
-        const fetchMock = vi.fn();
-        vi.stubGlobal('fetch', fetchMock);
-
-        const models = await claudeModelList({
-            env: {
-                ANTHROPIC_MODEL: 'GLM-4.6',
-                ANTHROPIC_SMALL_FAST_MODEL: 'GLM-4.5-Air',
-                ANTHROPIC_DEFAULT_SONNET_MODEL: 'GLM-4.6',
-            },
+    it('builds the picker rows from SDK probes (matching `claude /model` shape)', async () => {
+        mockProbeResponses({
+            default: 'claude-opus-4-7[1m]',
+            sonnet: 'claude-sonnet-4-6',
+            haiku: 'claude-haiku-4-5',
         });
 
-        expect(fetchMock).not.toHaveBeenCalled();
-        expect(models.map(m => m.model)).toEqual([
-            'default',
-            'opus',
-            'sonnet',
-            'haiku',
-            'GLM-4.6',
-            'GLM-4.5-Air',
-        ]);
-        expect(models.find(m => m.model === 'default')?.description).toContain('GLM-4.6');
-        expect(models.find(m => m.model === 'sonnet')?.description).toContain('GLM-4.6');
+        const models = await claudeModelList();
+
+        expect(queryMock).toHaveBeenCalledTimes(3);
+        expect(models.map(m => m.model)).toEqual(['default', 'sonnet', 'haiku']);
+
+        const def = models.find(m => m.model === 'default');
+        expect(def?.displayName).toBe('Default (recommended)');
+        expect(def?.description).toBe('Opus 4.7 with 1M context · Most capable for complex work');
+        expect(def?.isDefault).toBe(true);
+        expect(def?.source).toBe('cli');
+
+        const sonnet = models.find(m => m.model === 'sonnet');
+        expect(sonnet?.description).toBe('Sonnet 4.6 · Best for everyday tasks');
+
+        // Effort selector matches `claude --effort` choices, default = xhigh.
+        expect(def?.efforts?.map(e => e.id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+        expect(def?.efforts?.find(e => e.isDefault)?.id).toBe('xhigh');
     });
 
-    it('discovers Claude models from an Anthropic-compatible gateway', async () => {
+    it('discovers Claude models from a configured gateway when probes fail', async () => {
+        mockProbeResponses({ default: null, sonnet: null, haiku: null });
+
         const fetchMock = vi.fn(async () => jsonResponse({
             data: [
                 { id: 'claude-opus-4-7', display_name: 'Claude Opus 4.7' },
@@ -93,24 +130,34 @@ describe('claudeModelList', () => {
         expect(models.map(m => m.model)).not.toContain('not-claude');
     });
 
-    it('falls back to aliases when gateway discovery fails', async () => {
+    it('falls back to a static 3-row shape when probes and gateway both fail', async () => {
+        mockProbeResponses({ default: null, sonnet: null, haiku: null });
+
         const fetchMock = vi.fn(async () => jsonResponse({ error: 'nope' }, 500));
         vi.stubGlobal('fetch', fetchMock);
 
         const models = await claudeModelList({
             env: {
                 ANTHROPIC_BASE_URL: 'https://gateway.example.test',
-                ANTHROPIC_CUSTOM_MODEL_OPTION: 'custom-claude-model',
             },
         });
 
-        expect(fetchMock).toHaveBeenCalledTimes(1);
-        expect(models.map(m => m.model)).toEqual([
-            'default',
-            'opus',
-            'sonnet',
-            'haiku',
-            'custom-claude-model',
-        ]);
+        expect(models.map(m => m.model)).toEqual(['default', 'sonnet', 'haiku']);
+        expect(models[0].efforts).toBeDefined();
+        expect(models[0].source).toBe('builtin');
+        expect(models[0].isDefault).toBe(true);
+    });
+
+    it('returns the static fallback (still 3 rows) when no probes succeed and no gateway is configured', async () => {
+        mockProbeResponses({ default: null, sonnet: null, haiku: null });
+
+        const fetchMock = vi.fn();
+        vi.stubGlobal('fetch', fetchMock);
+
+        const models = await claudeModelList();
+
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(models.map(m => m.model)).toEqual(['default', 'sonnet', 'haiku']);
+        expect(models[0].efforts?.length).toBe(5);
     });
 });

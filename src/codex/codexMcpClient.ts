@@ -23,6 +23,41 @@ const CodexElicitRequestSchema = z.object({
 
 const DEFAULT_TIMEOUT = 14 * 24 * 60 * 60 * 1000; // 14 days, which is the half of the maximum possible timeout (~28 days for int32 value in NodeJS)
 
+// MCP tool names that are safe to auto-approve when codex asks for permission
+// to run them via mcp_tool_call elicitations. The four entries cover all
+// aliases registered in codex/happyMcpStdioBridge.ts:112-118 — different MCP
+// transports escape underscores differently (single vs. double) and the model
+// will pick whichever form appears in its prompt. Long-term we should collapse
+// to a single canonical name (`change_title`) and remove the rest, but until
+// the prompt + bridge are aligned, accept all four.
+const AUTO_APPROVE_MCP_TOOLS = new Set([
+    'change_title',
+    'change__title',
+    'happy__change_title',
+    'happy__change__title',
+]);
+
+/**
+ * Pull the actual MCP tool name out of a Codex `mcp_tool_call` elicitation.
+ *
+ * Codex doesn't put the tool name in a dedicated field — it embeds it in the
+ * human-readable message string (`Allow the happy MCP server to run tool
+ * "change__title"?`). `_meta.tool_title` is a display-friendly title (e.g.
+ * "Change Chat Title") and not the tool's invocation name, so we regex the
+ * message first and fall back to `_meta.tool_title` only if parsing fails.
+ */
+function extractMcpToolName(
+    message: string | undefined,
+    meta: { tool_title?: string } | undefined,
+): string | null {
+    if (typeof message === 'string') {
+        const match = message.match(/run tool ['"]([^'"]+)['"]/i);
+        if (match && match[1]) return match[1];
+    }
+    if (meta?.tool_title && typeof meta.tool_title === 'string') return meta.tool_title;
+    return null;
+}
+
 /**
  * Get the correct MCP subcommand based on installed codex version
  * Versions >= 0.43.0-alpha.5 use 'mcp-server', older versions use 'mcp'
@@ -135,7 +170,12 @@ export class CodexMcpClient {
     }
 
     private registerPermissionHandlers(): void {
-        // Register handler for exec command approval requests.
+        // Register handler for both flavors of Codex approval elicitations:
+        //   - exec_approval (bash exec): codex_command + codex_cwd are present
+        //   - mcp_tool_call (MCP tool from a configured server, e.g. happy):
+        //     _meta.codex_approval_kind === "mcp_tool_call",
+        //     _meta.tool_title / tool_description / tool_params are present,
+        //     codex_command / codex_cwd are absent.
         //
         // We MUST bypass the Client's overridden setRequestHandler and call
         // Protocol's base version directly. The Client override wraps elicitation
@@ -155,20 +195,45 @@ export class CodexMcpClient {
             CodexElicitRequestSchema,
             async (request: any) => {
                 const params = request.params as {
-                    message: string,
-                    codex_elicitation: string,
-                    codex_mcp_tool_call_id: string,
-                    codex_event_id: string,
-                    codex_call_id: string,
-                    codex_command: string[],
-                    codex_cwd: string
+                    message?: string,
+                    codex_elicitation?: string,
+                    codex_mcp_tool_call_id?: string,
+                    codex_event_id?: string,
+                    codex_call_id?: string,
+                    codex_command?: string[],
+                    codex_cwd?: string,
+                    _meta?: {
+                        codex_approval_kind?: string,
+                        tool_title?: string,
+                        tool_description?: string,
+                        tool_params?: Record<string, unknown>,
+                    },
                 };
+
+                const approvalKind = params._meta?.codex_approval_kind;
+                const isMcpToolCall = approvalKind === 'mcp_tool_call';
+
+                // Auto-approve known-safe MCP tool calls without round-tripping
+                // through the app (matches the auto-approval behavior the
+                // Gemini permission handler already has for change_title).
+                // The happy MCP server registers four name aliases for the
+                // title-change tool because different MCP transports escape
+                // underscores differently (single vs. double); keep the auto-
+                // approve list aligned with happyMcpStdioBridge.ts:112-118.
+                if (isMcpToolCall) {
+                    const mcpToolName = extractMcpToolName(params.message, params._meta);
+                    if (mcpToolName && AUTO_APPROVE_MCP_TOOLS.has(mcpToolName)) {
+                        logger.debug('[CodexMCP] Auto-approving safe MCP tool:', mcpToolName);
+                        return { decision: 'approved_for_session' as const };
+                    }
+                }
 
                 // Derive permission ID with intentional priority.
                 // codex_call_id is the exec-level call ID that matches the call_id
                 // in exec_approval_request events (used as tool call ID in the app).
                 const permissionId = params.codex_call_id || params.codex_mcp_tool_call_id;
-                logger.debug('[CodexMCP] Elicitation fields - codex_call_id:', params.codex_call_id,
+                logger.debug('[CodexMCP] Elicitation fields - kind:', approvalKind,
+                    'codex_call_id:', params.codex_call_id,
                     'codex_mcp_tool_call_id:', params.codex_mcp_tool_call_id,
                     'permissionId:', permissionId, 'keys:', Object.keys(params));
 
@@ -177,21 +242,38 @@ export class CodexMcpClient {
                     return { decision: 'denied' as const };
                 }
 
-                const toolName = 'CodexBash';
-
                 if (!this.permissionHandler) {
                     logger.debug('[CodexMCP] No permission handler set, denying');
                     return { decision: 'denied' as const };
                 }
 
+                // Pick a meaningful tool name for the app's permission UI:
+                //   - mcp_tool_call: the actual MCP tool name parsed from the
+                //     elicitation message / _meta (was previously hardcoded to
+                //     'CodexBash', which made the app misrender as a bash exec
+                //     prompt).
+                //   - exec_approval (default): keep the historical 'CodexBash'.
+                const toolName = isMcpToolCall
+                    ? (extractMcpToolName(params.message, params._meta) || 'CodexMcpTool')
+                    : 'CodexBash';
+
+                const toolInput = isMcpToolCall
+                    ? {
+                        toolName,
+                        title: params._meta?.tool_title,
+                        description: params._meta?.tool_description,
+                        arguments: params._meta?.tool_params,
+                    }
+                    : {
+                        command: params.codex_command,
+                        cwd: params.codex_cwd,
+                    };
+
                 try {
                     const result = await this.permissionHandler.handleToolCall(
                         permissionId,
                         toolName,
-                        {
-                            command: params.codex_command,
-                            cwd: params.codex_cwd
-                        }
+                        toolInput,
                     );
 
                     logger.debug('[CodexMCP] Permission result:', result);

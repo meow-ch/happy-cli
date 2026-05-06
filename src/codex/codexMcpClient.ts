@@ -14,11 +14,17 @@ import { execSync } from 'child_process';
 // The standard ElicitRequestSchema uses Zod's default strip mode which silently drops
 // unknown properties. Codex sends custom fields like codex_call_id, codex_command, and
 // codex_cwd as top-level params, so we need .passthrough() to keep them.
+//
+// The params schema is intentionally permissive (`.passthrough()` over an empty
+// object) — historic versions of codex put the elicitation message at
+// `params.message` (string), but newer versions emitting `mcp_tool_call`
+// approvals nest the human-readable text under `params.request.message` and
+// the codex-specific approval metadata under `params.request._meta`. A
+// stricter schema (e.g. requiring `params.message: z.string()`) silently
+// drops the request, leaving codex hung waiting for an approval response.
 const CodexElicitRequestSchema = z.object({
     method: z.literal('elicitation/create'),
-    params: z.object({
-        message: z.string(),
-    }).passthrough(),
+    params: z.object({}).passthrough(),
 }).passthrough();
 
 const DEFAULT_TIMEOUT = 14 * 24 * 60 * 60 * 1000; // 14 days, which is the half of the maximum possible timeout (~28 days for int32 value in NodeJS)
@@ -170,12 +176,19 @@ export class CodexMcpClient {
     }
 
     private registerPermissionHandlers(): void {
-        // Register handler for both flavors of Codex approval elicitations:
-        //   - exec_approval (bash exec): codex_command + codex_cwd are present
-        //   - mcp_tool_call (MCP tool from a configured server, e.g. happy):
-        //     _meta.codex_approval_kind === "mcp_tool_call",
-        //     _meta.tool_title / tool_description / tool_params are present,
-        //     codex_command / codex_cwd are absent.
+        // Register handler for Codex approval elicitations. As of codex 0.128
+        // only `exec_approval` (bash exec) actually arrives here as a standard
+        // MCP `elicitation/create` request — codex's mcp-server crate ships
+        // handlers for exec_approval.rs and patch_approval.rs only, with no
+        // mcp_tool_call_approval.rs equivalent. The newer
+        // `_meta.codex_approval_kind === "mcp_tool_call"` flow is emitted
+        // via `codex/event` notifications instead and waits for a response
+        // method that mcp-server doesn't expose, so we work around it by
+        // setting `approval-policy: 'on-request'` in runCodex.ts (which
+        // bypasses the elicitation entirely for MCP tool calls). The
+        // `mcp_tool_call` branch + AUTO_APPROVE_MCP_TOOLS set below stay as
+        // forward-looking defense in case codex routes mcp_tool_call_approval
+        // through standard elicit/create in a future release.
         //
         // We MUST bypass the Client's overridden setRequestHandler and call
         // Protocol's base version directly. The Client override wraps elicitation
@@ -202,6 +215,7 @@ export class CodexMcpClient {
                     codex_call_id?: string,
                     codex_command?: string[],
                     codex_cwd?: string,
+                    id?: string,
                     _meta?: {
                         codex_approval_kind?: string,
                         tool_title?: string,
@@ -231,7 +245,15 @@ export class CodexMcpClient {
                 // Derive permission ID with intentional priority.
                 // codex_call_id is the exec-level call ID that matches the call_id
                 // in exec_approval_request events (used as tool call ID in the app).
-                const permissionId = params.codex_call_id || params.codex_mcp_tool_call_id;
+                // For mcp_tool_call_approval elicitations the id can also arrive
+                // embedded in the elicitation id like
+                // "mcp_tool_call_approval_call_<id>"; extract it as a fallback.
+                let permissionId: string | undefined =
+                    params.codex_call_id || params.codex_mcp_tool_call_id;
+                if (!permissionId && typeof params.id === 'string') {
+                    const idMatch = params.id.match(/^mcp_tool_call_approval_(.+)$/);
+                    if (idMatch) permissionId = idMatch[1];
+                }
                 logger.debug('[CodexMCP] Elicitation fields - kind:', approvalKind,
                     'codex_call_id:', params.codex_call_id,
                     'codex_mcp_tool_call_id:', params.codex_mcp_tool_call_id,

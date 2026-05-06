@@ -594,7 +594,24 @@ export async function runCodex(opts: {
         happy: {
             // Run via Node directly to avoid shebang/exec-bit issues across environments.
             command: process.execPath,
-            args: [bridgeCommand, '--url', happyServer.url]
+            args: [bridgeCommand, '--url', happyServer.url],
+            // Pre-trust every tool exposed by the happy MCP server (we
+            // registered it ourselves; the model is asking permission to
+            // call something we've already authorized). Without this, codex
+            // 0.128's mcp-server elicits an mcp_tool_call_approval that has
+            // no response path back to the daemon → session deadlocks on
+            // the very first model-driven MCP tool call (e.g. our
+            // auto-prompted change_title). Session-wide approval-policy
+            // (untrusted/on-request/never) doesn't bypass these — only the
+            // per-server default_tools_approval_mode does.
+            // Codex 0.128 accepts `auto`, `prompt`, or `approve` here.
+            // `prompt` (default) elicits → daemon hangs; `auto` routes to
+            // codex's auto-review subagent which ALSO elicits in mcp-server
+            // topology (verified by scripts/probe-codex-elicit.mjs);
+            // `approve` is the only value that bypasses the elicitation
+            // entirely and lets the tool execute. We register every tool
+            // exposed by `happy` ourselves, so blanket-approve is correct.
+            default_tools_approval_mode: 'approve',
         }
     } as const;
     let first = true;
@@ -671,7 +688,10 @@ export async function runCodex(opts: {
             currentModeHash = message.hash;
 
             try {
-                // Map permission mode to approval policy and sandbox for startSession
+                // Map permission mode to approval policy. Bash/exec approvals
+                // are gated by this; MCP tool approvals are gated separately
+                // by `default_tools_approval_mode` per MCP server (set above
+                // in `mcpServers.happy`).
                 const approvalPolicy = (() => {
                     switch (message.mode.permissionMode) {
                         // Codex native modes

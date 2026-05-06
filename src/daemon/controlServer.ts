@@ -108,7 +108,13 @@ export function startDaemonControlServer({
       schema: {
         body: z.object({
           directory: z.string(),
-          sessionId: z.string().optional()
+          sessionId: z.string().optional(),
+          // Optional CLI flavor — selects which `happy <subcommand>` to spawn.
+          // Mirrors the `agent` field on the network-side `spawn-happy-session`
+          // RPC handler so local HTTP callers (e.g. agent-plane/core) can pick
+          // codex or gemini instead of defaulting to claude. Unspecified =>
+          // claude, preserving the previous behavior for existing callers.
+          agent: z.enum(['claude', 'codex', 'gemini']).optional()
         }),
         response: {
           200: z.object({
@@ -129,10 +135,10 @@ export function startDaemonControlServer({
         }
       }
     }, async (request, reply) => {
-      const { directory, sessionId } = request.body;
+      const { directory, sessionId, agent } = request.body;
 
-      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}`);
-      const result = await spawnSession({ directory, sessionId });
+      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent || 'claude'}`);
+      const result = await spawnSession({ directory, sessionId, agent });
 
       switch (result.type) {
         case 'success':

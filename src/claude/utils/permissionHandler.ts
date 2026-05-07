@@ -22,6 +22,7 @@ interface PermissionResponse {
     reason?: string;
     mode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
     allowTools?: string[];
+    updatedInput?: Record<string, unknown>;
     receivedAt?: number;
 }
 
@@ -101,13 +102,25 @@ export class PermissionHandler {
                 pending.resolve({ behavior: 'deny', message: response.reason || 'Plan rejected' });
             }
         } else {
+            const approvedInput = this.getApprovedInput(response, pending.input);
+
             // Handle default case for all other tools
             const result: PermissionResult = response.approved
-                ? { behavior: 'allow', updatedInput: (pending.input as Record<string, unknown>) || {} }
+                ? { behavior: 'allow', updatedInput: approvedInput }
                 : { behavior: 'deny', message: response.reason || `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.` };
 
             pending.resolve(result);
         }
+    }
+
+    private getApprovedInput(response: PermissionResponse, fallbackInput: unknown): Record<string, unknown> {
+        if (response.approved && response.updatedInput && typeof response.updatedInput === 'object' && !Array.isArray(response.updatedInput)) {
+            return response.updatedInput;
+        }
+        if (fallbackInput && typeof fallbackInput === 'object' && !Array.isArray(fallbackInput)) {
+            return fallbackInput as Record<string, unknown>;
+        }
+        return {};
     }
 
     /**
@@ -407,6 +420,7 @@ export class PermissionHandler {
                         ...currentState.completedRequests,
                         [id]: {
                             ...request,
+                            arguments: this.getApprovedInput(message, request.arguments),
                             completedAt: Date.now(),
                             status: message.approved ? 'approved' : 'denied',
                             reason: message.reason,

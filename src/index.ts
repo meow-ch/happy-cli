@@ -34,6 +34,11 @@ import { execFileSync } from 'node:child_process'
 (async () => {
   const args = process.argv.slice(2)
 
+  if (args.length === 1 && (args[0] === '--version' || args[0] === '-v')) {
+    console.log(`${configuration.cliName} version: ${packageJson.version}`)
+    process.exit(0)
+  }
+
   // If --version is passed - do not log, its likely daemon inquiring about our version
   if (!args.includes('--version')) {
     logger.debug(`Starting ${configuration.cliName} CLI with args: `, process.argv)
@@ -488,8 +493,6 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan(`${cli} doctor 
         unknownArgs.push(arg)
       } else if (arg === '-v' || arg === '--version') {
         showVersion = true
-        // Also pass through to claude (will show after our version)
-        unknownArgs.push(arg)
       } else if (arg === '--happy-starting-mode') {
         options.startingMode = z.enum(['local', 'remote']).parse(args[++i])
       } else if (arg === '--yolo') {
@@ -606,7 +609,7 @@ ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
     // Show version
     if (showVersion) {
       console.log(`${configuration.cliName} version: ${packageJson.version}`)
-      // Don't exit - continue to pass --version to Claude Code
+      process.exit(0)
     }
 
     // Normal flow - auth and machine setup
@@ -614,22 +617,29 @@ ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
       credentials
     } = await authAndSetupMachineIfNeeded();
 
-    // Always auto-start daemon for simplicity
-    logger.debug(`Ensuring ${configuration.brandName} background service is running & matches our version...`);
+    // Daemon-spawned remote sessions must report back to the daemon that
+    // created them. If they try to manage daemon lifecycle themselves, they
+    // can restart the parent daemon while it is waiting for the session
+    // webhook, causing spawn-happy-session to time out upstream.
+    if (options.startedBy !== 'daemon') {
+      logger.debug(`Ensuring ${configuration.brandName} background service is running & matches our version...`);
 
-    if (!(await isDaemonRunningCurrentlyInstalledHappyVersion())) {
-      logger.debug(`Starting ${configuration.brandName} background service...`);
+      if (!(await isDaemonRunningCurrentlyInstalledHappyVersion())) {
+        logger.debug(`Starting ${configuration.brandName} background service...`);
 
-      // Use the built binary to spawn daemon
-      const daemonProcess = spawnHappyCLI(['daemon', 'start-sync'], {
-        detached: true,
-        stdio: 'ignore',
-        env: process.env
-      })
-      daemonProcess.unref();
+        // Use the built binary to spawn daemon
+        const daemonProcess = spawnHappyCLI(['daemon', 'start-sync'], {
+          detached: true,
+          stdio: 'ignore',
+          env: process.env
+        })
+        daemonProcess.unref();
 
-      // Give daemon a moment to write PID & port file
-      await new Promise(resolve => setTimeout(resolve, 200));
+        // Give daemon a moment to write PID & port file
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    } else {
+      logger.debug(`Skipping ${configuration.brandName} daemon lifecycle check for daemon-spawned session`);
     }
 
     // Start the CLI

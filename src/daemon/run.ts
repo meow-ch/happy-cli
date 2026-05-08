@@ -171,9 +171,17 @@ export async function startDaemon(): Promise<void> {
 
     // Session spawning awaiter system
     const pidToAwaiter = new Map<number, (session: TrackedSession) => void>();
+    let spawnInFlight = 0;
 
     // Helper functions
     const getCurrentChildren = () => Array.from(pidToTrackedSession.values());
+
+    const beginTrackedSpawn = () => {
+      spawnInFlight += 1;
+      return () => {
+        spawnInFlight = Math.max(0, spawnInFlight - 1);
+      };
+    };
 
     // Handle webhook from happy session reporting itself
     const onHappySessionWebhook = (sessionId: string, sessionMetadata: Metadata) => {
@@ -224,50 +232,50 @@ export async function startDaemon(): Promise<void> {
       const { directory, sessionId, machineId, approvedNewDirectoryCreation = true } = options;
       let directoryCreated = false;
 
+      const finishSpawn = beginTrackedSpawn();
       try {
-        await fs.access(directory);
-        logger.debug(`[DAEMON RUN] Directory exists: ${directory}`);
-      } catch (error) {
-        logger.debug(`[DAEMON RUN] Directory doesn't exist, creating: ${directory}`);
-
-        // Check if directory creation is approved
-        if (!approvedNewDirectoryCreation) {
-          logger.debug(`[DAEMON RUN] Directory creation not approved for: ${directory}`);
-          return {
-            type: 'requestToApproveDirectoryCreation',
-            directory
-          };
-        }
-
         try {
-          await fs.mkdir(directory, { recursive: true });
-          logger.debug(`[DAEMON RUN] Successfully created directory: ${directory}`);
-          directoryCreated = true;
-        } catch (mkdirError: any) {
-          let errorMessage = `Unable to create directory at '${directory}'. `;
+          await fs.access(directory);
+          logger.debug(`[DAEMON RUN] Directory exists: ${directory}`);
+        } catch (error) {
+          logger.debug(`[DAEMON RUN] Directory doesn't exist, creating: ${directory}`);
 
-          // Provide more helpful error messages based on the error code
-          if (mkdirError.code === 'EACCES') {
-            errorMessage += `Permission denied. You don't have write access to create a folder at this location. Try using a different path or check your permissions.`;
-          } else if (mkdirError.code === 'ENOTDIR') {
-            errorMessage += `A file already exists at this path or in the parent path. Cannot create a directory here. Please choose a different location.`;
-          } else if (mkdirError.code === 'ENOSPC') {
-            errorMessage += `No space left on device. Your disk is full. Please free up some space and try again.`;
-          } else if (mkdirError.code === 'EROFS') {
-            errorMessage += `The file system is read-only. Cannot create directories here. Please choose a writable location.`;
-          } else {
-            errorMessage += `System error: ${mkdirError.message || mkdirError}. Please verify the path is valid and you have the necessary permissions.`;
+          // Check if directory creation is approved
+          if (!approvedNewDirectoryCreation) {
+            logger.debug(`[DAEMON RUN] Directory creation not approved for: ${directory}`);
+            return {
+              type: 'requestToApproveDirectoryCreation',
+              directory
+            };
           }
 
-          logger.debug(`[DAEMON RUN] Directory creation failed: ${errorMessage}`);
-          return {
-            type: 'error',
-            errorMessage
-          };
-        }
-      }
+          try {
+            await fs.mkdir(directory, { recursive: true });
+            logger.debug(`[DAEMON RUN] Successfully created directory: ${directory}`);
+            directoryCreated = true;
+          } catch (mkdirError: any) {
+            let errorMessage = `Unable to create directory at '${directory}'. `;
 
-      try {
+            // Provide more helpful error messages based on the error code
+            if (mkdirError.code === 'EACCES') {
+              errorMessage += `Permission denied. You don't have write access to create a folder at this location. Try using a different path or check your permissions.`;
+            } else if (mkdirError.code === 'ENOTDIR') {
+              errorMessage += `A file already exists at this path or in the parent path. Cannot create a directory here. Please choose a different location.`;
+            } else if (mkdirError.code === 'ENOSPC') {
+              errorMessage += `No space left on device. Your disk is full. Please free up some space and try again.`;
+            } else if (mkdirError.code === 'EROFS') {
+              errorMessage += `The file system is read-only. Cannot create directories here. Please choose a writable location.`;
+            } else {
+              errorMessage += `System error: ${mkdirError.message || mkdirError}. Please verify the path is valid and you have the necessary permissions.`;
+            }
+
+            logger.debug(`[DAEMON RUN] Directory creation failed: ${errorMessage}`);
+            return {
+              type: 'error',
+              errorMessage
+            };
+          }
+        }
 
         // Build environment variables with explicit precedence layers:
         // Layer 1 (base): Authentication tokens - protected, cannot be overridden
@@ -593,6 +601,8 @@ export async function startDaemon(): Promise<void> {
           type: 'error',
           errorMessage: `Failed to spawn session: ${errorMessage}`
         };
+      } finally {
+        finishSpawn();
       }
     };
 
@@ -724,6 +734,13 @@ export async function startDaemon(): Promise<void> {
       // BIG if - does this get updated from underneath us on npm upgrade?
       const projectVersion = JSON.parse(readFileSync(join(projectPath(), 'package.json'), 'utf-8')).version;
       if (projectVersion !== configuration.currentCliVersion) {
+        const activeSessionCount = pidToTrackedSession.size;
+        if (spawnInFlight > 0 || activeSessionCount > 0) {
+          logger.debug(`[DAEMON RUN] Daemon is outdated, but restart is postponed because spawnInFlight=${spawnInFlight}, activeSessions=${activeSessionCount}`);
+          heartbeatRunning = false;
+          return;
+        }
+
         logger.debug('[DAEMON RUN] Daemon is outdated, triggering self-restart with latest version, clearing heartbeat interval');
 
         clearInterval(restartOnStaleVersionAndHeartbeat);

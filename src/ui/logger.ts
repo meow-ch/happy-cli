@@ -51,8 +51,12 @@ class Logger {
   constructor(
     public readonly logFilePath = getSessionLogPath()
   ) {
+    const args = process.argv.slice(2)
+    const versionOnly = args.length === 1 && (args[0] === '--version' || args[0] === '-v')
+
     // Remote logging enabled only when explicitly set with server URL
-    if (process.env.DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING 
+    if (!versionOnly
+      && process.env.DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING
       && process.env.HAPPY_SERVER_URL) {
       this.dangerouslyUnencryptedServerLoggingUrl = process.env.HAPPY_SERVER_URL
       console.log(chalk.yellow('[REMOTE LOGGING] Sending logs to server for AI debugging'))

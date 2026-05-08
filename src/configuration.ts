@@ -62,15 +62,18 @@ class Configuration {
     this.brandName = this.flavor === 'boujot' ? 'Boujot' : 'Happy'
     this.configDirName = this.flavor === 'boujot' ? '.boujot' : '.happy'
 
-    // Server configuration — required, no fallback default
-    if (!process.env.HAPPY_SERVER_URL) {
+    const args = process.argv.slice(2)
+    const versionOnly = args.length === 1 && (args[0] === '--version' || args[0] === '-v')
+
+    // Server configuration — required, no fallback default except for pure
+    // version checks, which must not need auth, network, or daemon setup.
+    if (!process.env.HAPPY_SERVER_URL && !versionOnly) {
       throw new Error('HAPPY_SERVER_URL environment variable is required')
     }
-    this.serverUrl = process.env.HAPPY_SERVER_URL
+    this.serverUrl = process.env.HAPPY_SERVER_URL || 'https://server.invalid'
     this.webappUrl = process.env.HAPPY_WEBAPP_URL || 'https://app.happy.engineering'
 
     // Check if we're running as daemon based on process args
-    const args = process.argv.slice(2)
     this.isDaemonProcess = args.length >= 2 && args[0] === 'daemon' && (args[1] === 'start-sync')
 
     // Directory configuration - Priority: HAPPY_HOME_DIR env > default home dir

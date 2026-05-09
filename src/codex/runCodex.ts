@@ -1,7 +1,7 @@
 import { render } from "ink";
 import React from "react";
 import { ApiClient } from '@/api/api';
-import { CodexMcpClient } from './codexMcpClient';
+import { CodexAppServerClient, type CodexAppServerInput } from './codexAppServerClient';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { ReasoningProcessor } from './utils/reasoningProcessor';
 import { DiffProcessor } from './utils/diffProcessor';
@@ -15,7 +15,7 @@ import os from 'node:os';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
 import { projectPath } from '@/projectPath';
-import { resolve, join } from 'node:path';
+import { join } from 'node:path';
 import { createSessionMetadata } from '@/utils/createSessionMetadata';
 import fs from 'node:fs';
 import { startHappyServer } from '@/claude/utils/startHappyServer';
@@ -78,10 +78,16 @@ export async function runCodex(opts: {
 }): Promise<void> {
     // Use shared PermissionMode type for cross-agent compatibility
     type PermissionMode = import('@/api/types').PermissionMode;
+    interface CodexImageContent {
+        mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+        data: string;
+    }
     interface EnhancedMode {
         permissionMode: PermissionMode;
         model?: string;
         reasoningEffort?: string;
+        images?: CodexImageContent[];
+        imageBatchId?: string;
     }
 
     //
@@ -165,6 +171,7 @@ export async function runCodex(opts: {
         permissionMode: mode.permissionMode,
         model: mode.model,
         reasoningEffort: mode.reasoningEffort,
+        imageBatchId: mode.imageBatchId,
     }));
 
     // Track current overrides to apply per message
@@ -202,18 +209,36 @@ export async function runCodex(opts: {
             logger.debug(`[Codex] Reasoning effort updated from user message: ${messageReasoningEffort || 'reset to default'}`);
         }
 
-        // Get text from message content (handles both text and multipart)
-        const messageText = message.content.type === 'text'
-            ? message.content.text
-            : message.content.parts
-                .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
-                .map(p => p.text)
-                .join('\n');
+        let messageText = '';
+        let messageImages: CodexImageContent[] | undefined;
+        if (message.content.type === 'text') {
+            messageText = message.content.text;
+        } else {
+            const images: CodexImageContent[] = [];
+            for (const part of message.content.parts) {
+                if (part.type === 'text') {
+                    messageText = messageText ? `${messageText}\n${part.text}` : part.text;
+                    continue;
+                }
+                if (part.type === 'image' && part.source.type === 'base64') {
+                    images.push({
+                        mediaType: part.source.media_type,
+                        data: part.source.data,
+                    });
+                }
+            }
+            if (images.length > 0) {
+                messageImages = images;
+                logger.debug(`[Codex] Extracted ${images.length} image(s) from user message`);
+            }
+        }
 
         const enhancedMode: EnhancedMode = {
             permissionMode: messagePermissionMode || 'default',
             model: messageModel,
             reasoningEffort: messageReasoningEffort,
+            images: messageImages,
+            imageBatchId: messageImages && messageImages.length > 0 ? randomUUID() : undefined,
         };
         messageQueue.push(messageText, enhancedMode);
     });
@@ -381,7 +406,8 @@ export async function runCodex(opts: {
     // Start Context 
     //
 
-    const client = new CodexMcpClient();
+    const client = new CodexAppServerClient();
+    const codexImageTempDir = join(os.tmpdir(), 'happy-codex-images', sessionTag);
 
     // Helper: find Codex session transcript for a given sessionId
     function findCodexResumeFile(sessionId: string | null): string | null {
@@ -424,6 +450,39 @@ export async function runCodex(opts: {
             return null;
         }
     }
+
+    function imageExtension(mediaType: CodexImageContent['mediaType']): string {
+        switch (mediaType) {
+            case 'image/jpeg':
+                return 'jpg';
+            case 'image/png':
+                return 'png';
+            case 'image/gif':
+                return 'gif';
+            case 'image/webp':
+                return 'webp';
+        }
+    }
+
+    function writeCodexImage(image: CodexImageContent): string {
+        fs.mkdirSync(codexImageTempDir, { recursive: true });
+        const filePath = join(codexImageTempDir, `${Date.now()}-${randomUUID()}.${imageExtension(image.mediaType)}`);
+        fs.writeFileSync(filePath, Buffer.from(image.data, 'base64'));
+        return filePath;
+    }
+
+    function buildCodexInput(text: string, images?: CodexImageContent[]): CodexAppServerInput[] {
+        const input: CodexAppServerInput[] = [];
+        for (const image of images ?? []) {
+            const path = writeCodexImage(image);
+            input.push({ type: 'localImage', path });
+        }
+        if (text.length > 0 || input.length === 0) {
+            input.push({ type: 'text', text, text_elements: [] });
+        }
+        return input;
+    }
+
     permissionHandler = new CodexPermissionHandler(session);
     const reasoningProcessor = new ReasoningProcessor((message) => {
         // Callback to send messages directly from the processor
@@ -614,8 +673,6 @@ export async function runCodex(opts: {
             default_tools_approval_mode: 'approve',
         }
     } as const;
-    let first = true;
-
     try {
         logger.debug('[codex]: client.connect begin');
         await client.connect();
@@ -684,7 +741,9 @@ export async function runCodex(opts: {
             }
 
             // Display user messages in the UI
-            messageBuffer.addMessage(message.message, 'user');
+            const imageCount = message.mode.images?.length ?? 0;
+            const userDisplay = message.message || (imageCount > 0 ? `[${imageCount} image${imageCount === 1 ? '' : 's'}]` : '');
+            messageBuffer.addMessage(userDisplay, 'user');
             currentModeHash = message.hash;
 
             try {
@@ -723,9 +782,10 @@ export async function runCodex(opts: {
 
                 if (!wasCreated) {
                     const startConfig: CodexSessionConfig = {
-                        prompt: first ? message.message + '\n\n' + CODEX_CHANGE_TITLE_INSTRUCTION : message.message,
+                        prompt: message.message,
                         sandbox,
                         'approval-policy': approvalPolicy,
+                        'base-instructions': CODEX_CHANGE_TITLE_INSTRUCTION,
                         config: { mcp_servers: mcpServers }
                     };
                     if (message.mode.model) {
@@ -762,14 +822,24 @@ export async function runCodex(opts: {
                     
                     await client.startSession(
                         startConfig,
-                        { signal: abortController.signal }
+                        {
+                            signal: abortController.signal,
+                            input: buildCodexInput(message.message, message.mode.images),
+                        }
                     );
                     wasCreated = true;
-                    first = false;
                 } else {
                     const response = await client.continueSession(
-                        message.message,
-                        { signal: abortController.signal }
+                        buildCodexInput(message.message, message.mode.images),
+                        {
+                            signal: abortController.signal,
+                            mode: {
+                                model: message.mode.model,
+                                model_reasoning_effort: message.mode.reasoningEffort,
+                                'approval-policy': approvalPolicy,
+                                sandbox,
+                            }
+                        }
                     );
                     logger.debug('[Codex] continueSession response:', response);
                 }

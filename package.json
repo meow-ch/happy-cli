@@ -1,6 +1,6 @@
 {
-  "name": "happy-coder",
-  "version": "0.14.0-0",
+  "name": "@boujot/happy-coder",
+  "version": "0.14.9",
   "description": "Mobile and Web client for Claude Code and Codex",
   "author": "Kirill Dubovitskiy",
   "license": "MIT",
@@ -9,8 +9,8 @@
   "bugs": "https://github.com/slopus/happy-cli/issues",
   "repository": "slopus/happy-cli",
   "bin": {
-    "happy": "./bin/happy.mjs",
-    "happy-mcp": "./bin/happy-mcp.mjs"
+    "boujot": "./bin/boujot.mjs",
+    "boujot-mcp": "./bin/boujot-mcp.mjs"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",

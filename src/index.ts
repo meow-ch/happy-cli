@@ -117,7 +117,7 @@ import { execFileSync } from 'node:child_process'
     // Handle gemini subcommands
     const geminiSubcommand = args[1];
     
-    // Handle "happy gemini model set <model>" command
+    // Handle "boujot gemini model set <model>" command
     if (geminiSubcommand === 'model' && args[2] === 'set' && args[3]) {
       const modelName = args[3];
       const validModels = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
@@ -167,7 +167,7 @@ import { execFileSync } from 'node:child_process'
       }
     }
     
-    // Handle "happy gemini model get" command
+    // Handle "boujot gemini model get" command
     if (geminiSubcommand === 'model' && args[2] === 'get') {
       try {
         const { existsSync, readFileSync } = require('fs');
@@ -206,7 +206,7 @@ import { execFileSync } from 'node:child_process'
       }
     }
     
-    // Handle "happy gemini project set <project-id>" command
+    // Handle "boujot gemini project set <project-id>" command
     if (geminiSubcommand === 'project' && args[2] === 'set' && args[3]) {
       const projectId = args[3];
       
@@ -247,7 +247,7 @@ import { execFileSync } from 'node:child_process'
       }
     }
     
-    // Handle "happy gemini project get" command
+    // Handle "boujot gemini project get" command
     if (geminiSubcommand === 'project' && args[2] === 'get') {
       try {
         const { readGeminiLocalConfig } = await import('@/gemini/utils/config');
@@ -278,7 +278,7 @@ import { execFileSync } from 'node:child_process'
       }
     }
     
-    // Handle "happy gemini project" (no subcommand) - show help
+    // Handle "boujot gemini project" (no subcommand) - show help
     if (geminiSubcommand === 'project' && !args[2]) {
       const cli = configuration.cliName;
       console.log(`Usage: ${cli} gemini project <command>`);

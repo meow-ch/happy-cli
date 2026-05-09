@@ -46,8 +46,8 @@
  * ### Triggered By
  * - `happy` (fresh start) - new session created
  * - `happy --continue` - continues last session (may fork)
- * - `happy --resume` - interactive picker, then resume
- * - `happy --resume <id>` - resume specific session
+ * - `boujot --resume` - interactive picker, then resume
+ * - `boujot --resume <id>` - resume specific session
  * - `/compact` command - compacts and forks session
  * - Double-escape fork - user forks conversation in CLI
  * 

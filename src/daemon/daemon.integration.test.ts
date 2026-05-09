@@ -62,7 +62,7 @@ async function isServerHealthy(): Promise<boolean> {
     const testCredentials = existsSync(join(configuration.happyHomeDir, 'access.key'));
     if (!testCredentials) {
       console.log('[TEST] No test credentials found in', configuration.happyHomeDir);
-      console.log('[TEST] Run "happy auth login" with HAPPY_HOME_DIR=~/.happy-dev-test first');
+      console.log('[TEST] Run "boujot auth login" with HAPPY_HOME_DIR=~/.happy-dev-test first');
       return false;
     }
     
@@ -132,7 +132,7 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
     expect(sessions).toHaveLength(1);
     
     const tracked = sessions[0];
-    expect(tracked.startedBy).toBe('happy directly - likely by user from terminal');
+    expect(tracked.startedBy).toBe('boujot directly - likely by user from terminal');
     expect(tracked.happySessionId).toBe('test-session-123');
     expect(tracked.pid).toBe(99999);
   });
@@ -219,7 +219,7 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
     );
 
     expect(terminalSession).toBeDefined();
-    expect(terminalSession.startedBy).toBe('happy directly - likely by user from terminal');
+    expect(terminalSession.startedBy).toBe('boujot directly - likely by user from terminal');
     
     expect(daemonSession).toBeDefined();
     expect(daemonSession.startedBy).toBe('daemon');

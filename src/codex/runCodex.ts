@@ -648,7 +648,7 @@ export async function runCodex(opts: {
 
     // Start Happy MCP server (HTTP) and prepare STDIO bridge config for Codex
     const happyServer = await startHappyServer(session);
-    const bridgeCommand = join(projectPath(), 'bin', 'happy-mcp.mjs');
+    const bridgeCommand = join(projectPath(), 'bin', 'boujot-mcp.mjs');
     const mcpServers = {
         happy: {
             // Run via Node directly to avoid shebang/exec-bit issues across environments.

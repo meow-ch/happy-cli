@@ -88,7 +88,7 @@ Initiated by mobile app via backend RPC:
 User runs `happy` directly:
 1. CLI auto-starts daemon if configured
 2. Happy process calls `notifyDaemonSessionStarted()` 
-3. Daemon receives webhook, creates `TrackedSession` with `startedBy: 'happy directly...'`
+3. Daemon receives webhook, creates `TrackedSession` with `startedBy: 'boujot directly...'`
 4. Session tracked for health monitoring
 
 ### Session Termination
@@ -118,7 +118,7 @@ Local HTTP server (127.0.0.1 only) provides:
 
 ### Clean Runaway Processes
 
-`happy doctor clean`:
+`boujot doctor clean`:
 1. `findRunawayHappyProcesses()` filters for likely orphans
 2. `killRunawayHappyProcesses()`:
    - Sends SIGTERM

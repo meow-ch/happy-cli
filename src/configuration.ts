@@ -36,7 +36,7 @@ class Configuration {
   public readonly cliName: string
   /** Display brand: 'Happy' or 'Boujot' — use in user-facing messages */
   public readonly brandName: string
-  /** Config directory name: '.happy' or '.boujot' */
+  /** Config directory name: '.boujot' or '.boujot' */
   public readonly configDirName: string
 
   public readonly serverUrl: string
@@ -60,7 +60,7 @@ class Configuration {
     this.flavor = detectFlavor()
     this.cliName = this.flavor === 'boujot' ? 'boujot' : 'happy'
     this.brandName = this.flavor === 'boujot' ? 'Boujot' : 'Happy'
-    this.configDirName = this.flavor === 'boujot' ? '.boujot' : '.happy'
+    this.configDirName = this.flavor === 'boujot' ? '.boujot' : '.boujot'
 
     const args = process.argv.slice(2)
     const versionOnly = args.length === 1 && (args[0] === '--version' || args[0] === '-v')

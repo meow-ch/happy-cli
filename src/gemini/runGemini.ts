@@ -90,7 +90,7 @@ export async function runGemini(opts: {
   });
 
   //
-  // Fetch Gemini cloud token (from 'happy connect gemini')
+  // Fetch Gemini cloud token (from 'boujot connect gemini')
   //
   let cloudToken: string | undefined = undefined;
   let currentUserEmail: string | undefined = undefined;
@@ -498,7 +498,7 @@ export async function runGemini(opts: {
   //
 
   const happyServer = await startHappyServer(session);
-  const bridgeCommand = join(projectPath(), 'bin', 'happy-mcp.mjs');
+  const bridgeCommand = join(projectPath(), 'bin', 'boujot-mcp.mjs');
   const mcpServers = {
     happy: {
       // Run via Node directly to avoid shebang/exec-bit issues across environments.

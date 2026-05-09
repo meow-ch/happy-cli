@@ -87,7 +87,6 @@ export async function runCodex(opts: {
         model?: string;
         reasoningEffort?: string;
         images?: CodexImageContent[];
-        imageBatchId?: string;
     }
 
     //
@@ -171,7 +170,6 @@ export async function runCodex(opts: {
         permissionMode: mode.permissionMode,
         model: mode.model,
         reasoningEffort: mode.reasoningEffort,
-        imageBatchId: mode.imageBatchId,
     }));
 
     // Track current overrides to apply per message
@@ -238,9 +236,12 @@ export async function runCodex(opts: {
             model: messageModel,
             reasoningEffort: messageReasoningEffort,
             images: messageImages,
-            imageBatchId: messageImages && messageImages.length > 0 ? randomUUID() : undefined,
         };
-        messageQueue.push(messageText, enhancedMode);
+        if (messageImages && messageImages.length > 0) {
+            messageQueue.pushIsolate(messageText, enhancedMode);
+        } else {
+            messageQueue.push(messageText, enhancedMode);
+        }
     });
     let thinking = false;
     session.keepAlive(thinking, 'remote');

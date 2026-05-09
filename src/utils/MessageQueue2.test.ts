@@ -392,6 +392,55 @@ describe('MessageQueue2', () => {
         expect(batch2?.mode.type).toBe('A');
     });
 
+    it('should isolate messages pushed with pushIsolate without clearing pending messages', async () => {
+        const queue = new MessageQueue2<{ type: string }>((mode) => mode.type);
+
+        queue.push('message1', { type: 'A' });
+        queue.push('message2', { type: 'A' });
+        queue.pushIsolate('isolated', { type: 'A' });
+        queue.push('message3', { type: 'A' });
+        queue.push('message4', { type: 'A' });
+
+        const batch1 = await queue.waitForMessagesAndGetAsString();
+        expect(batch1?.message).toBe('message1\nmessage2');
+        expect(batch1?.mode.type).toBe('A');
+
+        const batch2 = await queue.waitForMessagesAndGetAsString();
+        expect(batch2?.message).toBe('isolated');
+        expect(batch2?.mode.type).toBe('A');
+        expect(batch2?.isolate).toBe(true);
+
+        const batch3 = await queue.waitForMessagesAndGetAsString();
+        expect(batch3?.message).toBe('message3\nmessage4');
+        expect(batch3?.mode.type).toBe('A');
+    });
+
+    it('should isolate image-style messages while keeping the same runtime hash', async () => {
+        interface Mode {
+            runtime: string;
+            images?: string[];
+        }
+        const queue = new MessageQueue2<Mode>((mode) => hashObject({ runtime: mode.runtime }));
+
+        queue.push('before', { runtime: 'codex' });
+        queue.pushIsolate('with image', { runtime: 'codex', images: ['image-data'] });
+        queue.push('after', { runtime: 'codex' });
+
+        const batch1 = await queue.waitForMessagesAndGetAsString();
+        expect(batch1?.message).toBe('before');
+        expect(batch1?.hash).toBe(hashObject({ runtime: 'codex' }));
+
+        const batch2 = await queue.waitForMessagesAndGetAsString();
+        expect(batch2?.message).toBe('with image');
+        expect(batch2?.hash).toBe(batch1?.hash);
+        expect(batch2?.mode.images).toEqual(['image-data']);
+        expect(batch2?.isolate).toBe(true);
+
+        const batch3 = await queue.waitForMessagesAndGetAsString();
+        expect(batch3?.message).toBe('after');
+        expect(batch3?.hash).toBe(batch1?.hash);
+    });
+
     it('should stop batching when hitting isolated message', async () => {
         const queue = new MessageQueue2<{ type: string }>((mode) => mode.type);
         

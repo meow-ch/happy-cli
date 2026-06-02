@@ -4,6 +4,9 @@
  */
 
 import { io, Socket } from 'socket.io-client';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { logger } from '@/ui/logger';
 import { configuration } from '@/configuration';
 import { MachineMetadata, DaemonState, Machine, Update, UpdateMachineBody } from './types';
@@ -75,6 +78,58 @@ type MachineRpcHandlers = {
     requestShutdown: () => void;
 }
 
+type PrepareAgentPlaneSessionFile = {
+    path: string;
+    content: string;
+};
+
+type PrepareAgentPlaneSessionRequest = {
+    directory: string;
+    files: PrepareAgentPlaneSessionFile[];
+};
+
+type PrepareAgentPlaneSessionResponse = {
+    type: 'success';
+    directory: string;
+    filesWritten: number;
+};
+
+function assertAgentPlaneSessionDirectory(directory: string): string {
+    const allowedRoot = resolve(tmpdir(), 'conversations');
+    const resolvedDirectory = resolve(directory);
+    if (resolvedDirectory !== allowedRoot && !resolvedDirectory.startsWith(allowedRoot + sep)) {
+        throw new Error(`Agent Plane session directory must be under ${allowedRoot}`);
+    }
+    return resolvedDirectory;
+}
+
+function assertRelativeSessionFilePath(directory: string, filePath: string): string {
+    if (!filePath || isAbsolute(filePath) || filePath.split(/[\\/]+/).includes('..')) {
+        throw new Error(`Invalid Agent Plane session file path: ${filePath}`);
+    }
+    const resolved = resolve(directory, filePath);
+    if (!resolved.startsWith(directory + sep)) {
+        throw new Error(`Agent Plane session file escapes directory: ${filePath}`);
+    }
+    return resolved;
+}
+
+async function prepareAgentPlaneSession(params: PrepareAgentPlaneSessionRequest): Promise<PrepareAgentPlaneSessionResponse> {
+    const directory = assertAgentPlaneSessionDirectory(params?.directory);
+    if (!Array.isArray(params.files)) {
+        throw new Error('files must be an array');
+    }
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    let filesWritten = 0;
+    for (const file of params.files) {
+        const target = assertRelativeSessionFilePath(directory, file.path);
+        await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+        await writeFile(target, String(file.content ?? ''), { encoding: 'utf8', mode: 0o600 });
+        filesWritten += 1;
+    }
+    return { type: 'success', directory, filesWritten };
+}
+
 export class ApiMachineClient {
     private socket!: Socket<ServerToDaemonEvents, DaemonToServerEvents>;
     private keepAliveInterval: NodeJS.Timeout | null = null;
@@ -93,6 +148,10 @@ export class ApiMachineClient {
         });
 
         registerCommonHandlers(this.rpcHandlerManager, process.cwd());
+        this.rpcHandlerManager.registerHandler<PrepareAgentPlaneSessionRequest, PrepareAgentPlaneSessionResponse>(
+            'prepare-agent-plane-session',
+            async (params) => prepareAgentPlaneSession(params)
+        );
     }
 
     setRPCHandlers({

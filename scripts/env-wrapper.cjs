@@ -69,7 +69,9 @@ const env = {
   HAPPY_VARIANT: variant, // For internal validation
 };
 
-const binPath = path.join(__dirname, '..', 'bin', 'happy.mjs');
+const preferredBinPath = path.join(__dirname, '..', 'bin', 'boujot.mjs');
+const legacyBinPath = path.join(__dirname, '..', 'bin', 'happy.mjs');
+const binPath = fs.existsSync(preferredBinPath) ? preferredBinPath : legacyBinPath;
 const proc = spawn('node', [binPath, command, ...args], {
   env,
   stdio: 'inherit',

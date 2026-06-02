@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { lstat, mkdir, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
 export type PrepareAgentPlaneSessionFile = {
     path: string;
@@ -9,7 +9,8 @@ export type PrepareAgentPlaneSessionFile = {
 };
 
 export type PrepareAgentPlaneSessionRequest = {
-    directory: string;
+    conversationId?: string;
+    directory?: string;
     files: PrepareAgentPlaneSessionFile[];
 };
 
@@ -22,9 +23,21 @@ export type PrepareAgentPlaneSessionResponse = {
 const AGENT_PLANE_SESSION_ALLOWED_FILES = new Set(['AGENTS.md', 'CLAUDE.md', '.mcp.json']);
 const AGENT_PLANE_SESSION_MAX_FILES = 4;
 const AGENT_PLANE_SESSION_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const AGENT_PLANE_CONVERSATION_ID_PATTERN = /^conv_[A-Za-z0-9_-]{8,120}$/;
+
+function getAgentPlaneSessionRoot(): string {
+    return resolve(tmpdir(), 'conversations');
+}
+
+function assertAgentPlaneConversationId(conversationId: string): string {
+    if (!AGENT_PLANE_CONVERSATION_ID_PATTERN.test(conversationId)) {
+        throw new Error(`Invalid Agent Plane conversation ID: ${conversationId}`);
+    }
+    return conversationId;
+}
 
 function assertAgentPlaneSessionDirectory(directory: string): string {
-    const allowedRoot = resolve(tmpdir(), 'conversations');
+    const allowedRoot = getAgentPlaneSessionRoot();
     const resolvedDirectory = resolve(directory);
     if (resolvedDirectory !== allowedRoot && !resolvedDirectory.startsWith(allowedRoot + sep)) {
         throw new Error(`Agent Plane session directory must be under ${allowedRoot}`);
@@ -44,6 +57,16 @@ function assertRelativeSessionFilePath(directory: string, filePath: string): str
         throw new Error(`Agent Plane session file escapes directory: ${filePath}`);
     }
     return resolved;
+}
+
+function resolveAgentPlaneSessionDirectory(params: PrepareAgentPlaneSessionRequest): string {
+    if (typeof params?.conversationId === 'string' && params.conversationId.trim()) {
+        return join(getAgentPlaneSessionRoot(), assertAgentPlaneConversationId(params.conversationId.trim()));
+    }
+    if (typeof params?.directory === 'string' && params.directory.trim()) {
+        return assertAgentPlaneSessionDirectory(params.directory);
+    }
+    throw new Error('conversationId is required');
 }
 
 async function assertPlainDirectory(directory: string): Promise<void> {
@@ -71,15 +94,15 @@ async function writeSessionFileNoFollow(target: string, content: string): Promis
 }
 
 export async function prepareAgentPlaneSession(params: PrepareAgentPlaneSessionRequest): Promise<PrepareAgentPlaneSessionResponse> {
-    const directory = assertAgentPlaneSessionDirectory(params?.directory);
+    const directory = resolveAgentPlaneSessionDirectory(params);
     if (!Array.isArray(params.files)) {
         throw new Error('files must be an array');
     }
     if (params.files.length > AGENT_PLANE_SESSION_MAX_FILES) {
         throw new Error(`Too many Agent Plane session files: ${params.files.length}`);
     }
-    await mkdir(resolve(tmpdir(), 'conversations'), { recursive: true, mode: 0o700 });
-    await assertPlainDirectory(resolve(tmpdir(), 'conversations'));
+    await mkdir(getAgentPlaneSessionRoot(), { recursive: true, mode: 0o700 });
+    await assertPlainDirectory(getAgentPlaneSessionRoot());
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await assertPlainDirectory(directory);
     let filesWritten = 0;
@@ -93,7 +116,9 @@ export async function prepareAgentPlaneSession(params: PrepareAgentPlaneSessionR
 }
 
 export const __testAgentPlaneSessionPrep = {
+    assertAgentPlaneConversationId,
     assertAgentPlaneSessionDirectory,
     assertRelativeSessionFilePath,
     prepareAgentPlaneSession,
+    resolveAgentPlaneSessionDirectory,
 };

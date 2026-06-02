@@ -6,12 +6,13 @@ import { join } from 'node:path';
 import { __testAgentPlaneSessionPrep } from './agentPlaneSessionPrep';
 
 describe('Agent Plane session preparation RPC', () => {
-    it('writes session files under the local conversations temp root', async () => {
-        const directory = join(tmpdir(), 'conversations', `api-machine-test-${Date.now()}`);
+    it('writes session files under the local conversations temp root from conversationId', async () => {
+        const conversationId = `conv_api_machine_test_${Date.now()}`;
+        const directory = join(tmpdir(), 'conversations', conversationId);
         await rm(directory, { recursive: true, force: true });
 
         const result = await __testAgentPlaneSessionPrep.prepareAgentPlaneSession({
-            directory,
+            conversationId,
             files: [
                 { path: 'CLAUDE.md', content: 'primer' },
                 { path: '.mcp.json', content: '{"ok":true}' },
@@ -23,6 +24,33 @@ describe('Agent Plane session preparation RPC', () => {
         await expect(readFile(join(directory, '.mcp.json'), 'utf8')).resolves.toBe('{"ok":true}');
 
         await rm(directory, { recursive: true, force: true });
+    });
+
+    it('keeps legacy directory support only under the local conversations temp root', async () => {
+        const directory = join(tmpdir(), 'conversations', `api-machine-test-${Date.now()}`);
+        await rm(directory, { recursive: true, force: true });
+
+        const result = await __testAgentPlaneSessionPrep.prepareAgentPlaneSession({
+            directory,
+            files: [{ path: 'CLAUDE.md', content: 'primer' }],
+        });
+
+        expect(result).toEqual({ type: 'success', directory, filesWritten: 1 });
+        await expect(readFile(join(directory, 'CLAUDE.md'), 'utf8')).resolves.toBe('primer');
+
+        await rm(directory, { recursive: true, force: true });
+    });
+
+    it('rejects invalid conversation IDs', async () => {
+        await expect(__testAgentPlaneSessionPrep.prepareAgentPlaneSession({
+            conversationId: '../conv_escape',
+            files: [{ path: 'CLAUDE.md', content: 'primer' }],
+        })).rejects.toThrow(/Invalid Agent Plane conversation ID/);
+
+        await expect(__testAgentPlaneSessionPrep.prepareAgentPlaneSession({
+            conversationId: 'not-a-conversation',
+            files: [{ path: 'CLAUDE.md', content: 'primer' }],
+        })).rejects.toThrow(/Invalid Agent Plane conversation ID/);
     });
 
     it('rejects directories outside the local conversations temp root', async () => {

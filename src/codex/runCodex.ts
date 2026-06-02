@@ -23,6 +23,11 @@ import { MessageBuffer } from "@/ui/ink/messageBuffer";
 import { CodexDisplay } from "@/ui/ink/CodexDisplay";
 import { trimIdent } from "@/utils/trimIdent";
 import type { CodexSessionConfig } from './types';
+import {
+    CODEX_EXTERNAL_MCP_SERVERS_ENV,
+    mergeCodexMcpServers,
+    parseExternalCodexMcpServers,
+} from './codexMcpServers';
 // Codex does not support the Gemini-style `functions.happy__change_title` instruction.
 // It can, however, call MCP tools exposed via `mcp_servers` (see `mcpServers` below).
 const CODEX_CHANGE_TITLE_INSTRUCTION = [
@@ -650,7 +655,7 @@ export async function runCodex(opts: {
     // Start Happy MCP server (HTTP) and prepare STDIO bridge config for Codex
     const happyServer = await startHappyServer(session);
     const bridgeCommand = join(projectPath(), 'bin', 'boujot-mcp.mjs');
-    const mcpServers = {
+    const builtInMcpServers = {
         happy: {
             // Run via Node directly to avoid shebang/exec-bit issues across environments.
             command: process.execPath,
@@ -674,6 +679,13 @@ export async function runCodex(opts: {
             default_tools_approval_mode: 'approve',
         }
     } as const;
+    const externalMcp = parseExternalCodexMcpServers(process.env[CODEX_EXTERNAL_MCP_SERVERS_ENV]);
+    if (externalMcp.warning) {
+        logger.warn(`[Codex] ${externalMcp.warning}`);
+    } else if (Object.keys(externalMcp.servers).length > 0) {
+        logger.debug(`[Codex] Adding external MCP servers: ${Object.keys(externalMcp.servers).join(', ')}`);
+    }
+    const mcpServers = mergeCodexMcpServers(builtInMcpServers, externalMcp.servers);
     try {
         logger.debug('[codex]: client.connect begin');
         await client.connect();

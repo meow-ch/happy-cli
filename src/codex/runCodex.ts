@@ -83,12 +83,16 @@ export async function runCodex(opts: {
 }): Promise<void> {
     // Use shared PermissionMode type for cross-agent compatibility
     type PermissionMode = import('@/api/types').PermissionMode;
+    type CodexApprovalPolicy = import('@/api/types').CodexApprovalPolicy;
+    type CodexSandboxMode = import('@/api/types').CodexSandboxMode;
     interface CodexImageContent {
         mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
         data: string;
     }
     interface EnhancedMode {
         permissionMode: PermissionMode;
+        approvalPolicy?: CodexApprovalPolicy;
+        sandboxMode?: CodexSandboxMode;
         model?: string;
         reasoningEffort?: string;
         images?: CodexImageContent[];
@@ -173,6 +177,8 @@ export async function runCodex(opts: {
 
     const messageQueue = new MessageQueue2<EnhancedMode>((mode) => hashObject({
         permissionMode: mode.permissionMode,
+        approvalPolicy: mode.approvalPolicy,
+        sandboxMode: mode.sandboxMode,
         model: mode.model,
         reasoningEffort: mode.reasoningEffort,
     }));
@@ -180,6 +186,8 @@ export async function runCodex(opts: {
     // Track current overrides to apply per message
     // Use shared PermissionMode type from api/types for cross-agent compatibility
     let currentPermissionMode: import('@/api/types').PermissionMode | undefined = undefined;
+    let currentApprovalPolicy: import('@/api/types').CodexApprovalPolicy | undefined = undefined;
+    let currentSandboxMode: import('@/api/types').CodexSandboxMode | undefined = undefined;
     let currentModel: string | undefined = undefined;
     let currentReasoningEffort: string | undefined = undefined;
 
@@ -192,6 +200,22 @@ export async function runCodex(opts: {
             logger.debug(`[Codex] Permission mode updated from user message to: ${currentPermissionMode}`);
         } else {
             logger.debug(`[Codex] User message received with no permission mode override, using current: ${currentPermissionMode ?? 'default (effective)'}`);
+        }
+
+        // Resolve Codex approval policy; explicit null resets to mode default.
+        let messageApprovalPolicy = currentApprovalPolicy;
+        if (message.meta?.hasOwnProperty('approvalPolicy')) {
+            messageApprovalPolicy = message.meta.approvalPolicy || undefined;
+            currentApprovalPolicy = messageApprovalPolicy;
+            logger.debug(`[Codex] Approval policy updated from user message: ${messageApprovalPolicy || 'reset to mode default'}`);
+        }
+
+        // Resolve Codex sandbox mode; explicit null resets to mode default.
+        let messageSandboxMode = currentSandboxMode;
+        if (message.meta?.hasOwnProperty('sandboxMode')) {
+            messageSandboxMode = message.meta.sandboxMode || undefined;
+            currentSandboxMode = messageSandboxMode;
+            logger.debug(`[Codex] Sandbox mode updated from user message: ${messageSandboxMode || 'reset to mode default'}`);
         }
 
         // Resolve model; explicit null resets to default (undefined)
@@ -238,6 +262,8 @@ export async function runCodex(opts: {
 
         const enhancedMode: EnhancedMode = {
             permissionMode: messagePermissionMode || 'default',
+            approvalPolicy: messageApprovalPolicy,
+            sandboxMode: messageSandboxMode,
             model: messageModel,
             reasoningEffort: messageReasoningEffort,
             images: messageImages,
@@ -764,7 +790,7 @@ export async function runCodex(opts: {
                 // are gated by this; MCP tool approvals are gated separately
                 // by `default_tools_approval_mode` per MCP server (set above
                 // in `mcpServers.happy`).
-                const approvalPolicy = (() => {
+                const approvalPolicy = message.mode.approvalPolicy ?? (() => {
                     switch (message.mode.permissionMode) {
                         // Codex native modes
                         case 'default': return 'untrusted' as const;                    // Ask for non-trusted commands
@@ -778,7 +804,7 @@ export async function runCodex(opts: {
                         default: return 'untrusted' as const;                           // Safe fallback
                     }
                 })();
-                const sandbox = (() => {
+                const sandbox = message.mode.sandboxMode ?? (() => {
                     switch (message.mode.permissionMode) {
                         // Codex native modes
                         case 'default': return 'workspace-write' as const;              // Can write in workspace

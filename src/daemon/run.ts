@@ -66,6 +66,47 @@ async function getProfileEnvironmentVariablesForAgent(
   }
 }
 
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await fs.access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function prepareIsolatedCodexHome(extraEnv: Record<string, string>): Promise<void> {
+  if (extraEnv.CODEX_HOME) {
+    logger.debug('[DAEMON RUN] Codex CODEX_HOME supplied explicitly; skipping runtime home isolation');
+    return;
+  }
+  if (process.env.HAPPY_CODEX_ISOLATE_HOME === '0') {
+    logger.debug('[DAEMON RUN] HAPPY_CODEX_ISOLATE_HOME=0; skipping Codex runtime home isolation');
+    return;
+  }
+
+  const sourceCodexHome = process.env.CODEX_HOME || join(os.homedir(), '.codex');
+  const filesToCopy = ['auth.json', 'config.toml', 'models_cache.json'];
+  const copied: string[] = [];
+  const runtimeCodexHome = await fs.mkdtemp(join(os.tmpdir(), 'happy-codex-home-'));
+
+  for (const fileName of filesToCopy) {
+    const sourcePath = join(sourceCodexHome, fileName);
+    if (!(await fileExists(sourcePath))) continue;
+    await fs.copyFile(sourcePath, join(runtimeCodexHome, fileName));
+    copied.push(fileName);
+  }
+
+  if (copied.length === 0) {
+    logger.debug(`[DAEMON RUN] No local Codex auth/config files found in ${sourceCodexHome}; using inherited Codex environment`);
+    await fs.rm(runtimeCodexHome, { recursive: true, force: true });
+    return;
+  }
+
+  extraEnv.CODEX_HOME = runtimeCodexHome;
+  logger.debug(`[DAEMON RUN] Prepared isolated Codex runtime home with files: ${copied.join(', ')}`);
+}
+
 export async function startDaemon(): Promise<void> {
   // We don't have cleanup function at the time of server construction
   // Control flow is:
@@ -342,6 +383,10 @@ export async function startDaemon(): Promise<void> {
         // Example: ANTHROPIC_AUTH_TOKEN="${Z_AI_AUTH_TOKEN}" → ANTHROPIC_AUTH_TOKEN="sk-real-key"
         extraEnv = expandEnvironmentVariables(extraEnv, process.env);
         logger.debug(`[DAEMON RUN] After variable expansion: ${Object.keys(extraEnv).join(', ')}`);
+
+        if (options.agent === 'codex') {
+          await prepareIsolatedCodexHome(extraEnv);
+        }
 
         // Fail-fast validation: Check that any auth variables present are fully expanded
         // Only validate variables that are actually set (different agents need different auth)

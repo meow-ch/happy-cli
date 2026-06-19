@@ -133,6 +133,32 @@ interface ClaudeModelsListRequest {
     environmentVariables?: Record<string, string>;
 }
 
+interface AgentCapabilitiesListRequest {
+    agent?: 'claude' | 'codex';
+    environmentVariables?: Record<string, string>;
+}
+
+interface AgentCapabilityInfo {
+    provider: 'claude' | 'codex';
+    cliVersion?: string | null;
+    models: Array<ClaudeModelInfo | CodexModelInfo>;
+    defaultModel?: string | null;
+    reasoningEfforts: string[];
+    defaultReasoningEffort?: string | null;
+    permissionModes: string[];
+    approvalPolicies?: string[];
+    sandboxModes?: string[];
+    supportsPlanMode: boolean;
+    supportsTurnInterrupt: boolean;
+    supportsApprovalRequests: boolean;
+}
+
+interface AgentCapabilitiesListResponse {
+    success: boolean;
+    capabilities?: AgentCapabilityInfo[];
+    error?: string;
+}
+
 /*
  * Spawn Session Options and Result
  * This rpc type is used by the daemon, all other RPCs here are for sessions
@@ -164,6 +190,64 @@ export type SpawnSessionResult =
     | { type: 'success'; sessionId: string }
     | { type: 'requestToApproveDirectoryCreation'; directory: string }
     | { type: 'error'; errorMessage: string };
+
+function expandedEnvironment(data?: { environmentVariables?: Record<string, string> }): Record<string, string> | undefined {
+    return data?.environmentVariables
+        ? expandEnvironmentVariables(data.environmentVariables, process.env)
+        : undefined;
+}
+
+async function commandVersion(command: string): Promise<string | null> {
+    try {
+        const { stdout } = await execAsync(command, { timeout: 5_000 });
+        return stdout.toString().trim() || null;
+    } catch {
+        return null;
+    }
+}
+
+function uniqueStrings(values: Array<string | undefined | null>): string[] {
+    return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.length > 0))];
+}
+
+async function buildClaudeCapabilities(env: Record<string, string> | undefined): Promise<AgentCapabilityInfo> {
+    const models = await claudeModelList({ timeoutMs: 10_000, env });
+    const efforts = uniqueStrings(models.flatMap((model) => model.efforts?.map((effort) => effort.id) ?? []));
+    const defaultEffort = models
+        .flatMap((model) => model.efforts ?? [])
+        .find((effort) => effort.isDefault)?.id ?? null;
+    return {
+        provider: 'claude',
+        cliVersion: await commandVersion('claude --version'),
+        models,
+        defaultModel: models.find((model) => model.isDefault)?.model ?? models[0]?.model ?? null,
+        reasoningEfforts: efforts,
+        defaultReasoningEffort: defaultEffort,
+        permissionModes: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
+        supportsPlanMode: true,
+        supportsTurnInterrupt: true,
+        supportsApprovalRequests: true,
+    };
+}
+
+async function buildCodexCapabilities(env: Record<string, string> | undefined): Promise<AgentCapabilityInfo> {
+    const models = await codexModelList({ timeoutMs: 10_000, env });
+    const efforts = uniqueStrings(models.flatMap((model) => model.supportedReasoningEfforts?.map((effort) => effort.reasoningEffort) ?? []));
+    return {
+        provider: 'codex',
+        cliVersion: await commandVersion('codex --version'),
+        models,
+        defaultModel: models.find((model) => model.isDefault)?.model ?? models[0]?.model ?? null,
+        reasoningEfforts: efforts,
+        defaultReasoningEffort: models.find((model) => model.isDefault)?.defaultReasoningEffort ?? models[0]?.defaultReasoningEffort ?? null,
+        permissionModes: ['default', 'read-only', 'safe-yolo', 'yolo', 'acceptEdits', 'bypassPermissions'],
+        approvalPolicies: ['untrusted', 'on-request', 'on-failure', 'never'],
+        sandboxModes: ['read-only', 'workspace-write', 'danger-full-access'],
+        supportsPlanMode: false,
+        supportsTurnInterrupt: true,
+        supportsApprovalRequests: true,
+    };
+}
 
 /**
  * Register all RPC handlers with the session
@@ -546,9 +630,7 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
     // Codex models list handler - dynamic model discovery from local Codex CLI.
     rpcHandlerManager.registerHandler<CodexModelsListRequest, CodexModelsListResponse>('codex-models-list', async (data) => {
         try {
-            const env = data?.environmentVariables
-                ? expandEnvironmentVariables(data.environmentVariables, process.env)
-                : undefined;
+            const env = expandedEnvironment(data);
             const models = await codexModelList({ timeoutMs: 10_000, env });
             return { success: true, models };
         } catch (error) {
@@ -559,13 +641,27 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
     // Claude models list handler - gateway discovery plus Claude Code alias fallback.
     rpcHandlerManager.registerHandler<ClaudeModelsListRequest, ClaudeModelsListResponse>('claude-models-list', async (data) => {
         try {
-            const env = data?.environmentVariables
-                ? expandEnvironmentVariables(data.environmentVariables, process.env)
-                : undefined;
+            const env = expandedEnvironment(data);
             const models = await claudeModelList({ timeoutMs: 10_000, env });
             return { success: true, models };
         } catch (error) {
             return { success: false, error: error instanceof Error ? error.message : 'Failed to list Claude models' };
+        }
+    });
+
+    rpcHandlerManager.registerHandler<AgentCapabilitiesListRequest, AgentCapabilitiesListResponse>('agent-capabilities-list', async (data) => {
+        try {
+            const env = expandedEnvironment(data);
+            const agents = data?.agent ? [data.agent] : ['claude', 'codex'] as const;
+            const capabilities: AgentCapabilityInfo[] = [];
+            for (const agent of agents) {
+                capabilities.push(agent === 'claude'
+                    ? await buildClaudeCapabilities(env)
+                    : await buildCodexCapabilities(env));
+            }
+            return { success: true, capabilities };
+        } catch (error) {
+            return { success: false, error: error instanceof Error ? error.message : 'Failed to list agent capabilities' };
         }
     });
 }

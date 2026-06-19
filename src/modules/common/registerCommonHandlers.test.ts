@@ -5,6 +5,11 @@ const mockState = vi.hoisted(() => ({
     claudeModelList: vi.fn(),
     codexModelList: vi.fn(),
     expandEnvironmentVariables: vi.fn(),
+    exec: vi.fn(),
+}));
+
+vi.mock('child_process', () => ({
+    exec: mockState.exec,
 }));
 
 vi.mock('@/claude/claudeModelList', () => ({
@@ -41,6 +46,11 @@ describe('registerCommonHandlers codex-models-list', () => {
         mockState.claudeModelList.mockReset();
         mockState.codexModelList.mockReset();
         mockState.expandEnvironmentVariables.mockReset();
+        mockState.exec.mockReset();
+        mockState.exec.mockImplementation((_command: string, _options: unknown, callback?: (error: Error | null, stdout: string, stderr: string) => void) => {
+            callback?.(null, 'mock-version\n', '');
+            return {};
+        });
     });
 
     it('expands profile environment variables before listing Codex models', async () => {
@@ -92,6 +102,11 @@ describe('registerCommonHandlers claude-models-list', () => {
         mockState.claudeModelList.mockReset();
         mockState.codexModelList.mockReset();
         mockState.expandEnvironmentVariables.mockReset();
+        mockState.exec.mockReset();
+        mockState.exec.mockImplementation((_command: string, _options: unknown, callback?: (error: Error | null, stdout: string, stderr: string) => void) => {
+            callback?.(null, 'mock-version\n', '');
+            return {};
+        });
     });
 
     it('expands profile environment variables before listing Claude models', async () => {
@@ -134,6 +149,80 @@ describe('registerCommonHandlers claude-models-list', () => {
         expect(result).toEqual({
             success: true,
             models: [{ model: 'sonnet' }],
+        });
+    });
+});
+
+describe('registerCommonHandlers agent-capabilities-list', () => {
+    beforeEach(() => {
+        mockState.claudeModelList.mockReset();
+        mockState.codexModelList.mockReset();
+        mockState.expandEnvironmentVariables.mockReset();
+        mockState.exec.mockReset();
+        mockState.exec.mockImplementation((_command: string, _options: unknown, callback?: (error: Error | null, stdout: string, stderr: string) => void) => {
+            callback?.(null, 'mock-version\n', '');
+            return {};
+        });
+    });
+
+    it('returns provider-neutral Codex capabilities from local model metadata', async () => {
+        mockState.codexModelList.mockResolvedValue([{
+            model: 'gpt-5.5',
+            isDefault: true,
+            defaultReasoningEffort: 'medium',
+            supportedReasoningEfforts: [
+                { reasoningEffort: 'low' },
+                { reasoningEffort: 'medium' },
+            ],
+        }]);
+
+        const handler = registerHandlers().get('agent-capabilities-list');
+        if (!handler) throw new Error('agent-capabilities-list handler was not registered');
+        const result = await handler({ agent: 'codex' });
+
+        expect(result).toMatchObject({
+            success: true,
+            capabilities: [{
+                provider: 'codex',
+                defaultModel: 'gpt-5.5',
+                reasoningEfforts: ['low', 'medium'],
+                defaultReasoningEffort: 'medium',
+                permissionModes: ['default', 'read-only', 'safe-yolo', 'yolo', 'acceptEdits', 'bypassPermissions'],
+                approvalPolicies: ['untrusted', 'on-request', 'on-failure', 'never'],
+                sandboxModes: ['read-only', 'workspace-write', 'danger-full-access'],
+                supportsPlanMode: false,
+                supportsTurnInterrupt: true,
+                supportsApprovalRequests: true,
+            }],
+        });
+    });
+
+    it('returns Claude plan-mode support and model efforts', async () => {
+        mockState.claudeModelList.mockResolvedValue([{
+            model: 'default',
+            isDefault: true,
+            efforts: [
+                { id: 'low' },
+                { id: 'xhigh', isDefault: true },
+            ],
+        }]);
+
+        const handler = registerHandlers().get('agent-capabilities-list');
+        if (!handler) throw new Error('agent-capabilities-list handler was not registered');
+        const result = await handler({ agent: 'claude' });
+
+        expect(result).toMatchObject({
+            success: true,
+            capabilities: [{
+                provider: 'claude',
+                defaultModel: 'default',
+                reasoningEfforts: ['low', 'xhigh'],
+                defaultReasoningEffort: 'xhigh',
+                permissionModes: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
+                supportsPlanMode: true,
+                supportsTurnInterrupt: true,
+                supportsApprovalRequests: true,
+            }],
         });
     });
 });

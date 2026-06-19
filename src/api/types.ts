@@ -14,6 +14,8 @@ import { UsageSchema } from '@/claude/types'
  * - read-only → default
  */
 export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'read-only' | 'safe-yolo' | 'yolo'
+export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never'
+export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
 /**
  * Usage data type from Claude
@@ -246,6 +248,8 @@ export type SessionMessage = z.infer<typeof SessionMessageSchema>
 export const MessageMetaSchema = z.object({
   sentFrom: z.string().optional(), // Source identifier
   permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo']).optional(), // Permission mode for this message
+  approvalPolicy: z.enum(['untrusted', 'on-failure', 'on-request', 'never']).nullable().optional(), // Codex approval policy override (null = reset)
+  sandboxMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).nullable().optional(), // Codex sandbox override (null = reset)
   model: z.string().nullable().optional(), // Model name for this message (null = reset)
   fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)
   customSystemPrompt: z.string().nullable().optional(), // Custom system prompt for this message (null = reset)

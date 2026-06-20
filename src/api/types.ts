@@ -382,26 +382,59 @@ export type Metadata = {
   flavor?: string
 };
 
+export type AgentRequestKind = 'permission' | 'questionnaire'
+
+export type AgentQuestionnaireOption = {
+  label: string
+  description?: string | null
+}
+
+export type AgentQuestionnaireQuestion = {
+  id: string
+  header?: string | null
+  question: string
+  options?: AgentQuestionnaireOption[] | null
+  isOther?: boolean
+  isSecret?: boolean
+  multiSelect?: boolean
+}
+
+export type AgentQuestionnaire = {
+  provider: 'claude' | 'codex'
+  questions: AgentQuestionnaireQuestion[]
+  autoResolutionMs?: number | null
+}
+
+export type AgentQuestionnaireAnswer = {
+  answers: string[]
+}
+
+export type AgentQuestionnaireAnswerMap = Record<string, AgentQuestionnaireAnswer>
+
+export type AgentStateRequest = {
+  kind?: AgentRequestKind
+  tool: string,
+  arguments: any,
+  createdAt: number,
+  questionnaire?: AgentQuestionnaire
+}
+
+export type AgentStateCompletedRequest = AgentStateRequest & {
+  completedAt: number,
+  status: 'canceled' | 'denied' | 'approved' | 'answered' | 'expired',
+  reason?: string,
+  mode?: PermissionMode,
+  decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort',
+  allowTools?: string[],
+  answers?: AgentQuestionnaireAnswerMap
+}
+
 export type AgentState = {
   controlledByUser?: boolean | null | undefined
   requests?: {
-    [id: string]: {
-      tool: string,
-      arguments: any,
-      createdAt: number
-    }
+    [id: string]: AgentStateRequest
   }
   completedRequests?: {
-    [id: string]: {
-      tool: string,
-      arguments: any,
-      createdAt: number,
-      completedAt: number,
-      status: 'canceled' | 'denied' | 'approved',
-      reason?: string,
-      mode?: PermissionMode,
-      decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort',
-      allowTools?: string[]
-    }
+    [id: string]: AgentStateCompletedRequest
   }
 }

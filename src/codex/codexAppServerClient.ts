@@ -4,6 +4,7 @@ import packageJson from '../../package.json';
 import { logger } from '@/ui/logger';
 import type { CodexSessionConfig, CodexToolResponse } from './types';
 import { CodexPermissionHandler } from './utils/permissionHandler';
+import type { AgentQuestionnaire } from '@/api/types';
 
 const DEFAULT_TIMEOUT = 14 * 24 * 60 * 60 * 1000;
 
@@ -498,6 +499,23 @@ export class CodexAppServerClient {
                 this.sendResult(request.id, { decision: mapPermissionDecision(result.decision) });
                 return;
             }
+            case 'item/tool/requestUserInput': {
+                const params = request.params as any;
+                if (!this.permissionHandler) {
+                    this.sendResult(request.id, { answers: {} });
+                    return;
+                }
+                const id = typeof params?.itemId === 'string' && params.itemId
+                    ? params.itemId
+                    : String(request.id);
+                const result = await this.permissionHandler.handleQuestionnaireRequest(
+                    id,
+                    'CodexRequestUserInput',
+                    normalizeCodexQuestionnaire(params)
+                );
+                this.sendResult(request.id, { answers: result.answers });
+                return;
+            }
             case 'mcpServer/elicitation/request': {
                 const params = request.params as any;
                 logger.debug('[CodexAppServer] Declining MCP elicitation request:', params?.serverName, params?.message);
@@ -693,4 +711,34 @@ export class CodexAppServerClient {
         }
         this.pendingTurns.clear();
     }
+}
+
+function normalizeCodexQuestionnaire(params: any): AgentQuestionnaire {
+    const questions = Array.isArray(params?.questions) ? params.questions : [];
+    return {
+        provider: 'codex',
+        autoResolutionMs: typeof params?.autoResolutionMs === 'number' ? params.autoResolutionMs : null,
+        questions: questions.map((question: any, index: number) => {
+            const id = typeof question?.id === 'string' && question.id ? question.id : `question_${index + 1}`;
+            const text = typeof question?.question === 'string' && question.question
+                ? question.question
+                : (typeof question?.header === 'string' && question.header ? question.header : `Question ${index + 1}`);
+            return {
+                id,
+                header: typeof question?.header === 'string' ? question.header : null,
+                question: text,
+                isOther: question?.isOther === true,
+                isSecret: question?.isSecret === true,
+                multiSelect: false,
+                options: Array.isArray(question?.options)
+                    ? question.options
+                        .map((option: any) => ({
+                            label: typeof option?.label === 'string' ? option.label : String(option ?? ''),
+                            description: typeof option?.description === 'string' ? option.description : null,
+                        }))
+                        .filter((option: { label: string }) => option.label.length > 0)
+                    : null,
+            };
+        }),
+    };
 }

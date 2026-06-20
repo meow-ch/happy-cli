@@ -9,7 +9,7 @@
 
 import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
-import { AgentState } from "@/api/types";
+import { AgentQuestionnaire, AgentQuestionnaireAnswerMap, AgentState } from "@/api/types";
 
 /**
  * Permission response from the mobile app.
@@ -37,6 +37,24 @@ export interface PermissionResult {
     decision: 'approved' | 'approved_for_session' | 'denied' | 'abort';
 }
 
+export interface QuestionnaireResponse {
+    id: string;
+    answers?: AgentQuestionnaireAnswerMap;
+    status?: 'answered' | 'expired' | 'canceled';
+}
+
+export interface PendingQuestionnaireRequest {
+    resolve: (value: QuestionnaireResult) => void;
+    reject: (error: Error) => void;
+    toolName: string;
+    questionnaire: AgentQuestionnaire;
+}
+
+export interface QuestionnaireResult {
+    answers: AgentQuestionnaireAnswerMap;
+    status: 'answered' | 'expired' | 'canceled';
+}
+
 /**
  * Abstract base class for permission handlers.
  *
@@ -45,6 +63,7 @@ export interface PermissionResult {
  */
 export abstract class BasePermissionHandler {
     protected pendingRequests = new Map<string, PendingRequest>();
+    protected pendingQuestionnaires = new Map<string, PendingQuestionnaireRequest>();
     protected session: ApiSessionClient;
     private isResetting = false;
 
@@ -118,6 +137,49 @@ export abstract class BasePermissionHandler {
                 logger.debug(`${this.getLogPrefix()} Permission ${response.approved ? 'approved' : 'denied'} for ${pending.toolName}`);
             }
         );
+
+        this.session.rpcHandlerManager.registerHandler<QuestionnaireResponse, void>(
+            'questionnaire',
+            async (response) => {
+                const pending = this.pendingQuestionnaires.get(response.id);
+                if (!pending) {
+                    logger.debug(`${this.getLogPrefix()} Questionnaire request not found or already resolved`);
+                    return;
+                }
+
+                this.pendingQuestionnaires.delete(response.id);
+
+                const result: QuestionnaireResult = {
+                    answers: normalizeQuestionnaireAnswers(response.answers),
+                    status: response.status ?? 'answered',
+                };
+
+                pending.resolve(result);
+
+                this.session.updateAgentState((currentState) => {
+                    const request = currentState.requests?.[response.id];
+                    if (!request) return currentState;
+
+                    const { [response.id]: _, ...remainingRequests } = currentState.requests || {};
+
+                    return {
+                        ...currentState,
+                        requests: remainingRequests,
+                        completedRequests: {
+                            ...currentState.completedRequests,
+                            [response.id]: {
+                                ...request,
+                                completedAt: Date.now(),
+                                status: result.status,
+                                answers: result.answers,
+                            }
+                        }
+                    } satisfies AgentState;
+                });
+
+                logger.debug(`${this.getLogPrefix()} Questionnaire ${result.status} for ${pending.toolName}`);
+            }
+        );
     }
 
     /**
@@ -129,12 +191,48 @@ export abstract class BasePermissionHandler {
             requests: {
                 ...currentState.requests,
                 [toolCallId]: {
+                    kind: 'permission',
                     tool: toolName,
                     arguments: input,
                     createdAt: Date.now()
                 }
             }
         }));
+    }
+
+    protected addPendingQuestionnaireToState(requestId: string, toolName: string, questionnaire: AgentQuestionnaire): void {
+        this.session.updateAgentState((currentState) => ({
+            ...currentState,
+            requests: {
+                ...currentState.requests,
+                [requestId]: {
+                    kind: 'questionnaire',
+                    tool: toolName,
+                    arguments: questionnaire,
+                    questionnaire,
+                    createdAt: Date.now()
+                }
+            }
+        }));
+    }
+
+    async handleQuestionnaireRequest(
+        requestId: string,
+        toolName: string,
+        questionnaire: AgentQuestionnaire
+    ): Promise<QuestionnaireResult> {
+        return new Promise<QuestionnaireResult>((resolve, reject) => {
+            this.pendingQuestionnaires.set(requestId, {
+                resolve,
+                reject,
+                toolName,
+                questionnaire
+            });
+
+            this.addPendingQuestionnaireToState(requestId, toolName, questionnaire);
+
+            logger.debug(`${this.getLogPrefix()} Questionnaire request sent for ${toolName} (${requestId})`);
+        });
     }
 
     /**
@@ -152,7 +250,9 @@ export abstract class BasePermissionHandler {
         try {
             // Snapshot pending requests to avoid Map mutation during iteration
             const pendingSnapshot = Array.from(this.pendingRequests.entries());
+            const pendingQuestionnaireSnapshot = Array.from(this.pendingQuestionnaires.entries());
             this.pendingRequests.clear(); // Clear immediately to prevent new entries being processed
+            this.pendingQuestionnaires.clear();
 
             // Reject all pending requests from snapshot
             for (const [id, pending] of pendingSnapshot) {
@@ -160,6 +260,14 @@ export abstract class BasePermissionHandler {
                     pending.reject(new Error('Session reset'));
                 } catch (err) {
                     logger.debug(`${this.getLogPrefix()} Error rejecting pending request ${id}:`, err);
+                }
+            }
+
+            for (const [id, pending] of pendingQuestionnaireSnapshot) {
+                try {
+                    pending.reject(new Error('Session reset'));
+                } catch (err) {
+                    logger.debug(`${this.getLogPrefix()} Error rejecting pending questionnaire ${id}:`, err);
                 }
             }
 
@@ -190,4 +298,20 @@ export abstract class BasePermissionHandler {
             this.isResetting = false;
         }
     }
+}
+
+function normalizeQuestionnaireAnswers(value: AgentQuestionnaireAnswerMap | undefined): AgentQuestionnaireAnswerMap {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    const normalized: AgentQuestionnaireAnswerMap = {};
+    for (const [key, answer] of Object.entries(value)) {
+        if (!answer || typeof answer !== 'object' || Array.isArray(answer)) continue;
+        const rawAnswers = Array.isArray(answer.answers) ? answer.answers : [];
+        normalized[key] = {
+            answers: rawAnswers
+                .filter((item): item is string => typeof item === 'string')
+                .map((item) => item.trim())
+                .filter((item) => item.length > 0)
+        };
+    }
+    return normalized;
 }

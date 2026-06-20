@@ -15,6 +15,11 @@ import { getToolName } from "./getToolName";
 import { EnhancedMode, PermissionMode } from "../loop";
 import { getToolDescriptor } from "./getToolDescriptor";
 import { delay } from "@/utils/time";
+import type {
+    AgentQuestionnaire,
+    AgentQuestionnaireAnswerMap,
+    AgentQuestionnaireQuestion
+} from "@/api/types";
 
 interface PermissionResponse {
     id: string;
@@ -34,10 +39,29 @@ interface PendingRequest {
     input: unknown;
 }
 
+interface QuestionnaireResponse {
+    id: string;
+    answers?: AgentQuestionnaireAnswerMap;
+    status?: 'answered' | 'expired' | 'canceled';
+}
+
+interface QuestionnaireResult {
+    answers: AgentQuestionnaireAnswerMap;
+    status: 'answered' | 'expired' | 'canceled';
+}
+
+interface PendingQuestionnaireRequest {
+    resolve: (value: QuestionnaireResult) => void;
+    reject: (error: Error) => void;
+    input: unknown;
+    questionnaire: AgentQuestionnaire;
+}
+
 export class PermissionHandler {
     private toolCalls: { id: string, name: string, input: any, used: boolean }[] = [];
     private responses = new Map<string, PermissionResponse>();
     private pendingRequests = new Map<string, PendingRequest>();
+    private pendingQuestionnaires = new Map<string, PendingQuestionnaireRequest>();
     private session: Session;
     private allowedTools = new Set<string>();
     private allowedBashLiterals = new Set<string>();
@@ -127,6 +151,23 @@ export class PermissionHandler {
      * Creates the canCallTool callback for the SDK
      */
     handleToolCall = async (toolName: string, input: unknown, mode: EnhancedMode, options: { signal: AbortSignal }): Promise<PermissionResult> => {
+
+        if (toolName === 'AskUserQuestion') {
+            let toolCallId = this.resolveToolCallId(toolName, input);
+            if (!toolCallId) {
+                await delay(1000);
+                toolCallId = this.resolveToolCallId(toolName, input);
+                if (!toolCallId) {
+                    throw new Error(`Could not resolve tool call ID for ${toolName}`);
+                }
+            }
+
+            const result = await this.handleQuestionnaireRequest(toolCallId, input, options.signal);
+            return {
+                behavior: 'allow',
+                updatedInput: this.buildClaudeQuestionnaireUpdatedInput(input, result.answers)
+            };
+        }
 
         // Check if tool is explicitly allowed
         if (toolName === 'Bash') {
@@ -240,6 +281,86 @@ export class PermissionHandler {
 
             logger.debug(`Permission request sent for tool call ${id}: ${toolName}`);
         });
+    }
+
+    private async handleQuestionnaireRequest(
+        id: string,
+        input: unknown,
+        signal: AbortSignal
+    ): Promise<QuestionnaireResult> {
+        const questionnaire = normalizeClaudeQuestionnaire(input);
+
+        return new Promise<QuestionnaireResult>((resolve, reject) => {
+            const abortHandler = () => {
+                this.pendingQuestionnaires.delete(id);
+                reject(new Error('Questionnaire request aborted'));
+            };
+            signal.addEventListener('abort', abortHandler, { once: true });
+
+            this.pendingQuestionnaires.set(id, {
+                resolve: (result: QuestionnaireResult) => {
+                    signal.removeEventListener('abort', abortHandler);
+                    resolve(result);
+                },
+                reject: (error: Error) => {
+                    signal.removeEventListener('abort', abortHandler);
+                    reject(error);
+                },
+                input,
+                questionnaire
+            });
+
+            if (this.onPermissionRequestCallback) {
+                this.onPermissionRequestCallback(id);
+            }
+
+            this.session.api.push().sendToAllDevices(
+                'Question',
+                questionnaire.questions[0]?.question || 'Claude needs your input',
+                {
+                    sessionId: this.session.client.sessionId,
+                    requestId: id,
+                    tool: 'AskUserQuestion',
+                    type: 'questionnaire_request'
+                }
+            );
+
+            this.session.client.updateAgentState((currentState) => ({
+                ...currentState,
+                requests: {
+                    ...currentState.requests,
+                    [id]: {
+                        kind: 'questionnaire',
+                        tool: 'AskUserQuestion',
+                        arguments: questionnaire,
+                        questionnaire,
+                        createdAt: Date.now()
+                    }
+                }
+            }));
+
+            logger.debug(`Questionnaire request sent for tool call ${id}: AskUserQuestion`);
+        });
+    }
+
+    private buildClaudeQuestionnaireUpdatedInput(input: unknown, answers: AgentQuestionnaireAnswerMap): Record<string, unknown> {
+        const inputObj = input && typeof input === 'object' && !Array.isArray(input)
+            ? input as Record<string, unknown>
+            : {};
+        const questionnaire = normalizeClaudeQuestionnaire(input);
+        const claudeAnswers: Record<string, string | string[]> = {};
+
+        for (const question of questionnaire.questions) {
+            const values = answers[question.id]?.answers ?? [];
+            const key = question.question || question.header || question.id;
+            claudeAnswers[key] = question.multiSelect ? values : (values[0] ?? '');
+        }
+
+        return {
+            ...inputObj,
+            questions: inputObj.questions,
+            answers: claudeAnswers
+        };
     }
 
 
@@ -362,6 +483,11 @@ export class PermissionHandler {
         }
         this.pendingRequests.clear();
 
+        for (const [, pending] of this.pendingQuestionnaires.entries()) {
+            pending.reject(new Error('Session reset'));
+        }
+        this.pendingQuestionnaires.clear();
+
         // Move all pending requests to completedRequests with canceled status
         this.session.client.updateAgentState((currentState) => {
             const pendingRequests = currentState.requests || {};
@@ -431,6 +557,49 @@ export class PermissionHandler {
                 };
             });
         });
+
+        this.session.client.rpcHandlerManager.registerHandler<QuestionnaireResponse, void>('questionnaire', async (message) => {
+            logger.debug(`Questionnaire response: ${JSON.stringify({
+                id: message.id,
+                status: message.status,
+                answerKeys: message.answers ? Object.keys(message.answers) : []
+            })}`);
+
+            const id = message.id;
+            const pending = this.pendingQuestionnaires.get(id);
+
+            if (!pending) {
+                logger.debug('Questionnaire request not found or already resolved');
+                return;
+            }
+
+            this.pendingQuestionnaires.delete(id);
+            const result: QuestionnaireResult = {
+                answers: normalizeQuestionnaireAnswers(message.answers),
+                status: message.status ?? 'answered'
+            };
+            pending.resolve(result);
+
+            this.session.client.updateAgentState((currentState) => {
+                const request = currentState.requests?.[id];
+                if (!request) return currentState;
+                let r = { ...currentState.requests };
+                delete r[id];
+                return {
+                    ...currentState,
+                    requests: r,
+                    completedRequests: {
+                        ...currentState.completedRequests,
+                        [id]: {
+                            ...request,
+                            completedAt: Date.now(),
+                            status: result.status,
+                            answers: result.answers
+                        }
+                    }
+                };
+            });
+        });
     }
 
     /**
@@ -439,4 +608,87 @@ export class PermissionHandler {
     getResponses(): Map<string, PermissionResponse> {
         return this.responses;
     }
+}
+
+function normalizeClaudeQuestionnaire(input: unknown): AgentQuestionnaire {
+    const inputObj = input && typeof input === 'object' && !Array.isArray(input)
+        ? input as Record<string, unknown>
+        : {};
+    const rawQuestions = Array.isArray(inputObj.questions) && inputObj.questions.length > 0
+        ? inputObj.questions
+        : [inputObj];
+
+    const questions = rawQuestions.map((question, index) => normalizeClaudeQuestion(question, index));
+
+    return {
+        provider: 'claude',
+        autoResolutionMs: typeof inputObj.autoResolutionMs === 'number' ? inputObj.autoResolutionMs : null,
+        questions
+    };
+}
+
+function normalizeClaudeQuestion(value: unknown, index: number): AgentQuestionnaireQuestion {
+    const question = value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+    const header = stringOrNull(question.header);
+    const text = stringOrNull(question.question) ?? header ?? `Question ${index + 1}`;
+    const id = stringOrNull(question.id) ?? text;
+    const options = Array.isArray(question.options)
+        ? question.options
+            .map(normalizeQuestionnaireOption)
+            .filter((option): option is { label: string; description: string | null } => option !== null)
+        : null;
+
+    return {
+        id,
+        header,
+        question: text,
+        options,
+        isOther: booleanFlag(question.isOther)
+            || booleanFlag(question.allowOther)
+            || booleanFlag(question.allowCustom)
+            || booleanFlag(question.allow_custom),
+        isSecret: booleanFlag(question.isSecret) || booleanFlag(question.secret),
+        multiSelect: booleanFlag(question.multiSelect) || booleanFlag(question.multi_select)
+    };
+}
+
+function normalizeQuestionnaireOption(value: unknown): { label: string; description: string | null } | null {
+    if (typeof value === 'string') {
+        const label = value.trim();
+        return label ? { label, description: null } : null;
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const option = value as Record<string, unknown>;
+    const label = stringOrNull(option.label) ?? stringOrNull(option.value);
+    if (!label) return null;
+    return {
+        label,
+        description: stringOrNull(option.description)
+    };
+}
+
+function normalizeQuestionnaireAnswers(value: AgentQuestionnaireAnswerMap | undefined): AgentQuestionnaireAnswerMap {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    const normalized: AgentQuestionnaireAnswerMap = {};
+    for (const [key, answer] of Object.entries(value)) {
+        if (!answer || typeof answer !== 'object' || Array.isArray(answer)) continue;
+        const rawAnswers = Array.isArray(answer.answers) ? answer.answers : [];
+        normalized[key] = {
+            answers: rawAnswers
+                .filter((item): item is string => typeof item === 'string')
+                .map((item) => item.trim())
+                .filter((item) => item.length > 0)
+        };
+    }
+    return normalized;
+}
+
+function stringOrNull(value: unknown): string | null {
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function booleanFlag(value: unknown): boolean {
+    return value === true;
 }

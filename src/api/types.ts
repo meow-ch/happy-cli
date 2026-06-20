@@ -2,10 +2,10 @@ import { z } from 'zod'
 import { UsageSchema } from '@/claude/types'
 
 /**
- * Permission mode type - includes both Claude and Codex modes
+ * Legacy permission mode type - includes both Claude and Codex preset modes.
  * Must match MessageMetaSchema.permissionMode enum values
  *
- * Claude modes: default, acceptEdits, bypassPermissions, plan
+ * Claude modes: default, acceptEdits, auto, bypassPermissions, dontAsk, plan
  * Codex modes: read-only, safe-yolo, yolo
  *
  * When calling Claude SDK, Codex modes are mapped at the SDK boundary:
@@ -13,7 +13,12 @@ import { UsageSchema } from '@/claude/types'
  * - safe-yolo → default
  * - read-only → default
  */
-export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'read-only' | 'safe-yolo' | 'yolo'
+export type ClaudePermissionMode = 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'dontAsk'
+export type PermissionMode = ClaudePermissionMode | 'plan' | 'read-only' | 'safe-yolo' | 'yolo'
+export type RuntimeMode = 'default' | 'plan'
+export type RuntimeAccessMode = 'read-only' | 'workspace-write' | 'danger-full-access'
+export type CodexCollaborationMode = 'default' | 'plan'
+export type CodexPermissionProfile = ':read-only' | ':workspace' | ':danger-full-access' | (string & {})
 export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never'
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
@@ -247,7 +252,12 @@ export type SessionMessage = z.infer<typeof SessionMessageSchema>
  */
 export const MessageMetaSchema = z.object({
   sentFrom: z.string().optional(), // Source identifier
-  permissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo']).optional(), // Permission mode for this message
+  permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan', 'read-only', 'safe-yolo', 'yolo']).optional(), // Legacy cross-provider mode for this message
+  mode: z.enum(['default', 'plan']).nullable().optional(), // Runtime collaboration/planning mode (null = reset)
+  accessMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).nullable().optional(), // Runtime filesystem/tool access mode (null = reset)
+  claudePermissionMode: z.enum(['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk']).nullable().optional(), // Claude permission override when mode is default (null = reset)
+  codexCollaborationMode: z.enum(['default', 'plan']).nullable().optional(), // Codex-native collaboration mode override (null = reset)
+  codexPermissionProfile: z.string().nullable().optional(), // Codex permission profile id, e.g. :workspace (null = reset)
   approvalPolicy: z.enum(['untrusted', 'on-failure', 'on-request', 'never']).nullable().optional(), // Codex approval policy override (null = reset)
   sandboxMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).nullable().optional(), // Codex sandbox override (null = reset)
   model: z.string().nullable().optional(), // Model name for this message (null = reset)

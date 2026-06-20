@@ -6,6 +6,8 @@ export interface CodexSessionConfig {
     prompt: string;
     'approval-policy'?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
     'base-instructions'?: string;
+    collaboration_mode?: 'default' | 'plan';
+    permissions?: string;
     config?: Record<string, any>;
     cwd?: string;
     'include-plan-tool'?: boolean;

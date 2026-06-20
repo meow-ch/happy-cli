@@ -6,6 +6,7 @@ import { createHash } from 'crypto';
 import { join } from 'path';
 import { run as runRipgrep } from '@/modules/ripgrep/index';
 import { run as runDifftastic } from '@/modules/difftastic/index';
+import { CodexAppServerClient } from '@/codex/codexAppServerClient';
 import { codexModelList, type CodexModelInfo } from '@/codex/codexModelList';
 import { claudeModelList, type ClaudeModelInfo } from '@/claude/claudeModelList';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
@@ -143,8 +144,13 @@ interface AgentCapabilityInfo {
     cliVersion?: string | null;
     models: Array<ClaudeModelInfo | CodexModelInfo>;
     defaultModel?: string | null;
+    runtimeModes: string[];
     reasoningEfforts: string[];
     defaultReasoningEffort?: string | null;
+    accessModes?: string[];
+    claudePermissionModes?: string[];
+    codexCollaborationModes?: string[];
+    codexPermissionProfiles?: string[];
     permissionModes: string[];
     approvalPolicies?: string[];
     sandboxModes?: string[];
@@ -221,29 +227,68 @@ async function buildClaudeCapabilities(env: Record<string, string> | undefined):
         cliVersion: await commandVersion('claude --version'),
         models,
         defaultModel: models.find((model) => model.isDefault)?.model ?? models[0]?.model ?? null,
+        runtimeModes: ['default', 'plan'],
         reasoningEfforts: efforts,
         defaultReasoningEffort: defaultEffort,
-        permissionModes: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
+        claudePermissionModes: ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk'],
+        permissionModes: ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan'],
         supportsPlanMode: true,
         supportsTurnInterrupt: true,
         supportsApprovalRequests: true,
     };
 }
 
+async function probeCodexRuntimeControls(env: Record<string, string> | undefined): Promise<{
+    collaborationModes: string[];
+    permissionProfiles: string[];
+}> {
+    const client = new CodexAppServerClient(env);
+    try {
+        await client.connect();
+        const [collaborationModes, permissionProfiles] = await Promise.all([
+            client.listCollaborationModes(),
+            client.listPermissionProfiles(),
+        ]);
+        return {
+            collaborationModes: uniqueStrings(collaborationModes.map((mode) => mode.mode ?? undefined)),
+            permissionProfiles: uniqueStrings(permissionProfiles.map((profile) => profile.id)),
+        };
+    } finally {
+        await client.disconnect();
+    }
+}
+
 async function buildCodexCapabilities(env: Record<string, string> | undefined): Promise<AgentCapabilityInfo> {
     const models = await codexModelList({ timeoutMs: 10_000, env });
     const efforts = uniqueStrings(models.flatMap((model) => model.supportedReasoningEfforts?.map((effort) => effort.reasoningEffort) ?? []));
+    let runtimeControls: { collaborationModes: string[]; permissionProfiles: string[] } = {
+        collaborationModes: ['default', 'plan'],
+        permissionProfiles: [':read-only', ':workspace', ':danger-full-access'],
+    };
+    try {
+        const probed = await probeCodexRuntimeControls(env);
+        runtimeControls = {
+            collaborationModes: probed.collaborationModes.length > 0 ? probed.collaborationModes : runtimeControls.collaborationModes,
+            permissionProfiles: probed.permissionProfiles.length > 0 ? probed.permissionProfiles : runtimeControls.permissionProfiles,
+        };
+    } catch (error) {
+        logger.debug('[agent-capabilities-list] Codex runtime control probe failed:', error);
+    }
     return {
         provider: 'codex',
         cliVersion: await commandVersion('codex --version'),
         models,
         defaultModel: models.find((model) => model.isDefault)?.model ?? models[0]?.model ?? null,
+        runtimeModes: runtimeControls.collaborationModes.length > 0 ? runtimeControls.collaborationModes : ['default', 'plan'],
         reasoningEfforts: efforts,
         defaultReasoningEffort: models.find((model) => model.isDefault)?.defaultReasoningEffort ?? models[0]?.defaultReasoningEffort ?? null,
-        permissionModes: ['default', 'read-only', 'safe-yolo', 'yolo', 'acceptEdits', 'bypassPermissions'],
+        accessModes: ['read-only', 'workspace-write', 'danger-full-access'],
+        codexCollaborationModes: runtimeControls.collaborationModes,
+        codexPermissionProfiles: runtimeControls.permissionProfiles,
+        permissionModes: ['default', 'plan', 'read-only', 'safe-yolo', 'yolo', 'acceptEdits', 'bypassPermissions'],
         approvalPolicies: ['untrusted', 'on-request', 'on-failure', 'never'],
         sandboxModes: ['read-only', 'workspace-write', 'danger-full-access'],
-        supportsPlanMode: false,
+        supportsPlanMode: runtimeControls.collaborationModes.includes('plan'),
         supportsTurnInterrupt: true,
         supportsApprovalRequests: true,
     };

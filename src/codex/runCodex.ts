@@ -28,6 +28,7 @@ import {
     mergeCodexMcpServers,
     parseExternalCodexMcpServers,
 } from './codexMcpServers';
+import { resolveCodexExecutionPolicy } from './executionPolicy';
 // Codex does not support the Gemini-style `functions.happy__change_title` instruction.
 // It can, however, call MCP tools exposed via `mcp_servers` (see `mcpServers` below).
 const CODEX_CHANGE_TITLE_INSTRUCTION = [
@@ -84,13 +85,21 @@ export async function runCodex(opts: {
     // Use shared PermissionMode type for cross-agent compatibility
     type PermissionMode = import('@/api/types').PermissionMode;
     type CodexApprovalPolicy = import('@/api/types').CodexApprovalPolicy;
+    type CodexCollaborationMode = import('@/api/types').CodexCollaborationMode;
+    type CodexPermissionProfile = import('@/api/types').CodexPermissionProfile;
     type CodexSandboxMode = import('@/api/types').CodexSandboxMode;
+    type RuntimeAccessMode = import('@/api/types').RuntimeAccessMode;
+    type RuntimeMode = import('@/api/types').RuntimeMode;
     interface CodexImageContent {
         mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
         data: string;
     }
     interface EnhancedMode {
         permissionMode: PermissionMode;
+        runtimeMode?: RuntimeMode;
+        accessMode?: RuntimeAccessMode;
+        collaborationMode?: CodexCollaborationMode;
+        permissionProfile?: CodexPermissionProfile;
         approvalPolicy?: CodexApprovalPolicy;
         sandboxMode?: CodexSandboxMode;
         model?: string;
@@ -177,6 +186,10 @@ export async function runCodex(opts: {
 
     const messageQueue = new MessageQueue2<EnhancedMode>((mode) => hashObject({
         permissionMode: mode.permissionMode,
+        runtimeMode: mode.runtimeMode,
+        accessMode: mode.accessMode,
+        collaborationMode: mode.collaborationMode,
+        permissionProfile: mode.permissionProfile,
         approvalPolicy: mode.approvalPolicy,
         sandboxMode: mode.sandboxMode,
         model: mode.model,
@@ -186,6 +199,10 @@ export async function runCodex(opts: {
     // Track current overrides to apply per message
     // Use shared PermissionMode type from api/types for cross-agent compatibility
     let currentPermissionMode: import('@/api/types').PermissionMode | undefined = undefined;
+    let currentRuntimeMode: import('@/api/types').RuntimeMode | undefined = undefined;
+    let currentAccessMode: import('@/api/types').RuntimeAccessMode | undefined = undefined;
+    let currentCollaborationMode: import('@/api/types').CodexCollaborationMode | undefined = undefined;
+    let currentPermissionProfile: import('@/api/types').CodexPermissionProfile | undefined = undefined;
     let currentApprovalPolicy: import('@/api/types').CodexApprovalPolicy | undefined = undefined;
     let currentSandboxMode: import('@/api/types').CodexSandboxMode | undefined = undefined;
     let currentModel: string | undefined = undefined;
@@ -200,6 +217,34 @@ export async function runCodex(opts: {
             logger.debug(`[Codex] Permission mode updated from user message to: ${currentPermissionMode}`);
         } else {
             logger.debug(`[Codex] User message received with no permission mode override, using current: ${currentPermissionMode ?? 'default (effective)'}`);
+        }
+
+        let messageRuntimeMode = currentRuntimeMode;
+        if (message.meta?.hasOwnProperty('mode')) {
+            messageRuntimeMode = message.meta.mode || undefined;
+            currentRuntimeMode = messageRuntimeMode;
+            logger.debug(`[Codex] Runtime mode updated from user message: ${messageRuntimeMode || 'reset to default'}`);
+        }
+
+        let messageAccessMode = currentAccessMode;
+        if (message.meta?.hasOwnProperty('accessMode')) {
+            messageAccessMode = message.meta.accessMode || undefined;
+            currentAccessMode = messageAccessMode;
+            logger.debug(`[Codex] Access mode updated from user message: ${messageAccessMode || 'reset to default'}`);
+        }
+
+        let messageCollaborationMode = currentCollaborationMode;
+        if (message.meta?.hasOwnProperty('codexCollaborationMode')) {
+            messageCollaborationMode = message.meta.codexCollaborationMode || undefined;
+            currentCollaborationMode = messageCollaborationMode;
+            logger.debug(`[Codex] Collaboration mode updated from user message: ${messageCollaborationMode || 'reset to default'}`);
+        }
+
+        let messagePermissionProfile = currentPermissionProfile;
+        if (message.meta?.hasOwnProperty('codexPermissionProfile')) {
+            messagePermissionProfile = (message.meta.codexPermissionProfile || undefined) as CodexPermissionProfile | undefined;
+            currentPermissionProfile = messagePermissionProfile;
+            logger.debug(`[Codex] Permission profile updated from user message: ${messagePermissionProfile || 'reset to mode default'}`);
         }
 
         // Resolve Codex approval policy; explicit null resets to mode default.
@@ -262,6 +307,10 @@ export async function runCodex(opts: {
 
         const enhancedMode: EnhancedMode = {
             permissionMode: messagePermissionMode || 'default',
+            runtimeMode: messageRuntimeMode,
+            accessMode: messageAccessMode,
+            collaborationMode: messageCollaborationMode,
+            permissionProfile: messagePermissionProfile,
             approvalPolicy: messageApprovalPolicy,
             sandboxMode: messageSandboxMode,
             model: messageModel,
@@ -786,52 +835,38 @@ export async function runCodex(opts: {
             currentModeHash = message.hash;
 
             try {
-                // Map permission mode to approval policy. Bash/exec approvals
-                // are gated by this; MCP tool approvals are gated separately
-                // by `default_tools_approval_mode` per MCP server (set above
-                // in `mcpServers.happy`).
-                const approvalPolicy = message.mode.approvalPolicy ?? (() => {
-                    switch (message.mode.permissionMode) {
-                        // Codex native modes
-                        case 'default': return 'untrusted' as const;                    // Ask for non-trusted commands
-                        case 'read-only': return 'never' as const;                      // Never ask, read-only enforced by sandbox
-                        case 'safe-yolo': return 'on-failure' as const;                 // Auto-run, ask only on failure
-                        case 'yolo': return 'on-failure' as const;                      // Auto-run, ask only on failure
-                        // Defensive fallback for Claude-specific modes (backward compatibility)
-                        case 'bypassPermissions': return 'on-failure' as const;         // Full access: map to yolo behavior
-                        case 'acceptEdits': return 'on-request' as const;               // Let model decide (closest to auto-approve edits)
-                        case 'plan': return 'untrusted' as const;                       // Conservative: ask for non-trusted
-                        default: return 'untrusted' as const;                           // Safe fallback
-                    }
-                })();
-                const sandbox = message.mode.sandboxMode ?? (() => {
-                    switch (message.mode.permissionMode) {
-                        // Codex native modes
-                        case 'default': return 'workspace-write' as const;              // Can write in workspace
-                        case 'read-only': return 'read-only' as const;                  // Read-only filesystem
-                        case 'safe-yolo': return 'workspace-write' as const;            // Can write in workspace
-                        case 'yolo': return 'danger-full-access' as const;              // Full system access
-                        // Defensive fallback for Claude-specific modes
-                        case 'bypassPermissions': return 'danger-full-access' as const; // Full access: map to yolo
-                        case 'acceptEdits': return 'workspace-write' as const;          // Can edit files in workspace
-                        case 'plan': return 'workspace-write' as const;                 // Can write for planning
-                        default: return 'workspace-write' as const;                     // Safe default
-                    }
-                })();
+                const policy = resolveCodexExecutionPolicy({
+                    runtimeMode: message.mode.runtimeMode,
+                    accessMode: message.mode.accessMode,
+                    permissionMode: message.mode.permissionMode,
+                    collaborationMode: message.mode.collaborationMode,
+                    permissionProfile: message.mode.permissionProfile,
+                    approvalPolicy: message.mode.approvalPolicy,
+                    sandboxMode: message.mode.sandboxMode,
+                    model: message.mode.model,
+                    reasoningEffort: message.mode.reasoningEffort,
+                });
 
                 if (!wasCreated) {
                     const startConfig: CodexSessionConfig = {
                         prompt: message.message,
-                        sandbox,
-                        'approval-policy': approvalPolicy,
+                        'approval-policy': policy.approvalPolicy,
                         'base-instructions': CODEX_CHANGE_TITLE_INSTRUCTION,
                         config: { mcp_servers: mcpServers }
                     };
-                    if (message.mode.model) {
-                        startConfig.model = message.mode.model;
+                    if (policy.permissionProfile) {
+                        startConfig.permissions = policy.permissionProfile;
+                    } else if (policy.sandboxMode) {
+                        startConfig.sandbox = policy.sandboxMode;
                     }
-                    if (message.mode.reasoningEffort) {
-                        startConfig.model_reasoning_effort = message.mode.reasoningEffort;
+                    if (policy.collaborationMode) {
+                        startConfig.collaboration_mode = policy.collaborationMode;
+                    }
+                    if (policy.model) {
+                        startConfig.model = policy.model;
+                    }
+                    if (policy.reasoningEffort) {
+                        startConfig.model_reasoning_effort = policy.reasoningEffort;
                     }
                     
                     // Check for resume file from multiple sources
@@ -873,10 +908,12 @@ export async function runCodex(opts: {
                         {
                             signal: abortController.signal,
                             mode: {
-                                model: message.mode.model,
-                                model_reasoning_effort: message.mode.reasoningEffort,
-                                'approval-policy': approvalPolicy,
-                                sandbox,
+                                model: policy.model,
+                                model_reasoning_effort: policy.reasoningEffort,
+                                'approval-policy': policy.approvalPolicy,
+                                permissions: policy.permissionProfile,
+                                sandbox: policy.sandboxMode,
+                                collaboration_mode: policy.collaborationMode,
                             }
                         }
                     );

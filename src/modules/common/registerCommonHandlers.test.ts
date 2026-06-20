@@ -4,6 +4,10 @@ import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager';
 const mockState = vi.hoisted(() => ({
     claudeModelList: vi.fn(),
     codexModelList: vi.fn(),
+    codexConnect: vi.fn(),
+    codexDisconnect: vi.fn(),
+    codexListCollaborationModes: vi.fn(),
+    codexListPermissionProfiles: vi.fn(),
     expandEnvironmentVariables: vi.fn(),
     exec: vi.fn(),
 }));
@@ -18,6 +22,15 @@ vi.mock('@/claude/claudeModelList', () => ({
 
 vi.mock('@/codex/codexModelList', () => ({
     codexModelList: mockState.codexModelList,
+}));
+
+vi.mock('@/codex/codexAppServerClient', () => ({
+    CodexAppServerClient: vi.fn().mockImplementation(() => ({
+        connect: mockState.codexConnect,
+        disconnect: mockState.codexDisconnect,
+        listCollaborationModes: mockState.codexListCollaborationModes,
+        listPermissionProfiles: mockState.codexListPermissionProfiles,
+    })),
 }));
 
 vi.mock('@/utils/expandEnvVars', () => ({
@@ -45,6 +58,10 @@ describe('registerCommonHandlers codex-models-list', () => {
     beforeEach(() => {
         mockState.claudeModelList.mockReset();
         mockState.codexModelList.mockReset();
+        mockState.codexConnect.mockReset();
+        mockState.codexDisconnect.mockReset();
+        mockState.codexListCollaborationModes.mockReset();
+        mockState.codexListPermissionProfiles.mockReset();
         mockState.expandEnvironmentVariables.mockReset();
         mockState.exec.mockReset();
         mockState.exec.mockImplementation((_command: string, _options: unknown, callback?: (error: Error | null, stdout: string, stderr: string) => void) => {
@@ -101,6 +118,10 @@ describe('registerCommonHandlers claude-models-list', () => {
     beforeEach(() => {
         mockState.claudeModelList.mockReset();
         mockState.codexModelList.mockReset();
+        mockState.codexConnect.mockReset();
+        mockState.codexDisconnect.mockReset();
+        mockState.codexListCollaborationModes.mockReset();
+        mockState.codexListPermissionProfiles.mockReset();
         mockState.expandEnvironmentVariables.mockReset();
         mockState.exec.mockReset();
         mockState.exec.mockImplementation((_command: string, _options: unknown, callback?: (error: Error | null, stdout: string, stderr: string) => void) => {
@@ -157,7 +178,22 @@ describe('registerCommonHandlers agent-capabilities-list', () => {
     beforeEach(() => {
         mockState.claudeModelList.mockReset();
         mockState.codexModelList.mockReset();
+        mockState.codexConnect.mockReset();
+        mockState.codexDisconnect.mockReset();
+        mockState.codexListCollaborationModes.mockReset();
+        mockState.codexListPermissionProfiles.mockReset();
         mockState.expandEnvironmentVariables.mockReset();
+        mockState.codexConnect.mockResolvedValue(undefined);
+        mockState.codexDisconnect.mockResolvedValue(undefined);
+        mockState.codexListCollaborationModes.mockResolvedValue([
+            { name: 'Default', mode: 'default' },
+            { name: 'Plan', mode: 'plan' },
+        ]);
+        mockState.codexListPermissionProfiles.mockResolvedValue([
+            { id: ':read-only' },
+            { id: ':workspace' },
+            { id: ':danger-full-access' },
+        ]);
         mockState.exec.mockReset();
         mockState.exec.mockImplementation((_command: string, _options: unknown, callback?: (error: Error | null, stdout: string, stderr: string) => void) => {
             callback?.(null, 'mock-version\n', '');
@@ -185,12 +221,16 @@ describe('registerCommonHandlers agent-capabilities-list', () => {
             capabilities: [{
                 provider: 'codex',
                 defaultModel: 'gpt-5.5',
+                runtimeModes: ['default', 'plan'],
                 reasoningEfforts: ['low', 'medium'],
                 defaultReasoningEffort: 'medium',
-                permissionModes: ['default', 'read-only', 'safe-yolo', 'yolo', 'acceptEdits', 'bypassPermissions'],
+                accessModes: ['read-only', 'workspace-write', 'danger-full-access'],
+                codexCollaborationModes: ['default', 'plan'],
+                codexPermissionProfiles: [':read-only', ':workspace', ':danger-full-access'],
+                permissionModes: ['default', 'plan', 'read-only', 'safe-yolo', 'yolo', 'acceptEdits', 'bypassPermissions'],
                 approvalPolicies: ['untrusted', 'on-request', 'on-failure', 'never'],
                 sandboxModes: ['read-only', 'workspace-write', 'danger-full-access'],
-                supportsPlanMode: false,
+                supportsPlanMode: true,
                 supportsTurnInterrupt: true,
                 supportsApprovalRequests: true,
             }],
@@ -216,9 +256,11 @@ describe('registerCommonHandlers agent-capabilities-list', () => {
             capabilities: [{
                 provider: 'claude',
                 defaultModel: 'default',
+                runtimeModes: ['default', 'plan'],
                 reasoningEfforts: ['low', 'xhigh'],
                 defaultReasoningEffort: 'xhigh',
-                permissionModes: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
+                claudePermissionModes: ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk'],
+                permissionModes: ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan'],
                 supportsPlanMode: true,
                 supportsTurnInterrupt: true,
                 supportsApprovalRequests: true,

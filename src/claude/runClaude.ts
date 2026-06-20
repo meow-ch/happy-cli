@@ -239,8 +239,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     }));
 
     // Forward messages to the queue
-    // Permission modes: Use the unified 7-mode type, mapping happens at SDK boundary in claudeRemote.ts
+    // Permission modes: prefer provider-native claudePermissionMode; keep permissionMode as a legacy alias.
     let currentPermissionMode: PermissionMode | undefined = options.permissionMode;
+    let currentRuntimeMode: import('@/api/types').RuntimeMode | undefined = undefined;
     let currentModel = options.model; // Track current model state
     let currentFallbackModel: string | undefined = undefined; // Track current fallback model
     let currentCustomSystemPrompt: string | undefined = undefined; // Track current custom system prompt
@@ -250,14 +251,30 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     session.onUserMessage((message) => {
         logger.debug(`[runClaude] Received user message. Content type: ${message.content?.type}, role: ${message.role}`);
 
+        let messageRuntimeMode = currentRuntimeMode;
+        if (message.meta?.hasOwnProperty('mode')) {
+            messageRuntimeMode = message.meta.mode || undefined;
+            currentRuntimeMode = messageRuntimeMode;
+            logger.debug(`[loop] Runtime mode updated from user message: ${currentRuntimeMode || 'reset to default'}`);
+        }
+
         // Resolve permission mode from meta - pass through as-is, mapping happens at SDK boundary
         let messagePermissionMode: PermissionMode | undefined = currentPermissionMode;
-        if (message.meta?.permissionMode) {
+        if (message.meta?.hasOwnProperty('claudePermissionMode')) {
+            messagePermissionMode = message.meta.claudePermissionMode || undefined;
+            currentPermissionMode = messagePermissionMode;
+            logger.debug(`[loop] Claude permission mode updated from user message to: ${currentPermissionMode || 'reset to default'}`);
+        } else if (message.meta?.permissionMode) {
             messagePermissionMode = message.meta.permissionMode;
             currentPermissionMode = messagePermissionMode;
             logger.debug(`[loop] Permission mode updated from user message to: ${currentPermissionMode}`);
         } else {
             logger.debug(`[loop] User message received with no permission mode override, using current: ${currentPermissionMode}`);
+        }
+        if (messageRuntimeMode === 'plan') {
+            messagePermissionMode = 'plan';
+        } else if (messagePermissionMode === 'plan') {
+            messagePermissionMode = 'default';
         }
 
         // Resolve model - use message.meta.model if provided, otherwise use current model

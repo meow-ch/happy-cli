@@ -40,6 +40,31 @@ type PendingTurn = {
     timer: NodeJS.Timeout;
 };
 
+function sandboxPolicyFromMode(mode: CodexSessionConfig['sandbox']): Record<string, unknown> | null {
+    switch (mode) {
+        case 'read-only':
+            return { type: 'readOnly' };
+        case 'workspace-write':
+            return { type: 'workspaceWrite' };
+        case 'danger-full-access':
+            return { type: 'dangerFullAccess' };
+        default:
+            return null;
+    }
+}
+
+function collaborationModeParams(config: Partial<CodexSessionConfig>): Record<string, unknown> | null {
+    if (!config.collaboration_mode || !config.model) return null;
+    return {
+        mode: config.collaboration_mode,
+        settings: {
+            model: config.model,
+            reasoning_effort: config.model_reasoning_effort ?? null,
+            developer_instructions: null,
+        },
+    };
+}
+
 function asError(error: unknown): Error {
     if (error instanceof Error) return error;
     return new Error(String(error ?? 'Unknown error'));
@@ -77,6 +102,8 @@ export class CodexAppServerClient {
     private permissionHandler: CodexPermissionHandler | null = null;
     private stderrBuf = '';
 
+    constructor(private readonly env?: Record<string, string>) {}
+
     setHandler(handler: ((event: any) => void) | null): void {
         this.handler = handler;
     }
@@ -91,11 +118,14 @@ export class CodexAppServerClient {
         logger.debug('[CodexAppServer] Connecting to Codex app-server');
         this.proc = spawn('codex', ['app-server', '--listen', 'stdio://'], {
             stdio: ['pipe', 'pipe', 'pipe'],
-            env: Object.keys(process.env).reduce((acc, key) => {
-                const value = process.env[key];
-                if (typeof value === 'string') acc[key] = value;
-                return acc;
-            }, {} as Record<string, string>),
+            env: {
+                ...Object.keys(process.env).reduce((acc, key) => {
+                    const value = process.env[key];
+                    if (typeof value === 'string') acc[key] = value;
+                    return acc;
+                }, {} as Record<string, string>),
+                ...(this.env ?? {}),
+            },
         });
 
         this.proc.stderr.on('data', (chunk) => {
@@ -124,11 +154,41 @@ export class CodexAppServerClient {
                 title: null,
                 version: packageJson.version ?? '0',
             },
-            capabilities: null,
+            capabilities: { experimentalApi: true },
         });
 
         this.connected = true;
         logger.debug('[CodexAppServer] Connected to Codex app-server');
+    }
+
+    async listCollaborationModes(): Promise<Array<{ name?: string; mode?: string | null; model?: string | null; reasoning_effort?: string | null }>> {
+        if (!this.connected) await this.connect();
+        const response = await this.rpcCall('collaborationMode/list', {});
+        return Array.isArray(response?.data) ? response.data : [];
+    }
+
+    async listPermissionProfiles(): Promise<Array<{ id: string; description?: string | null }>> {
+        if (!this.connected) await this.connect();
+        const profiles: Array<{ id: string; description?: string | null }> = [];
+        let cursor: string | null = null;
+        while (true) {
+            const response = await this.rpcCall(
+                'permissionProfile/list',
+                cursor ? { cursor, limit: 200 } : { limit: 200 },
+            );
+            if (Array.isArray(response?.data)) {
+                for (const profile of response.data) {
+                    if (profile && typeof profile.id === 'string') {
+                        profiles.push({
+                            id: profile.id,
+                            description: typeof profile.description === 'string' ? profile.description : null,
+                        });
+                    }
+                }
+            }
+            cursor = typeof response?.nextCursor === 'string' && response.nextCursor ? response.nextCursor : null;
+            if (!cursor) return profiles;
+        }
     }
 
     async startSession(
@@ -141,11 +201,15 @@ export class CodexAppServerClient {
             model: config.model ?? null,
             cwd: config.cwd ?? process.cwd(),
             approvalPolicy: config['approval-policy'] ?? null,
-            sandbox: config.sandbox ?? null,
             config: config.config ?? null,
             developerInstructions: config['base-instructions'] ?? null,
             ephemeral: false,
         };
+        if (config.permissions) {
+            threadParams.permissions = config.permissions;
+        } else {
+            threadParams.sandbox = config.sandbox ?? null;
+        }
 
         const threadResponse: any = await this.rpcCall('thread/start', threadParams, options?.signal);
         this.threadId = threadResponse?.thread?.id ?? null;
@@ -160,7 +224,10 @@ export class CodexAppServerClient {
 
     async continueSession(
         input: string | CodexAppServerInput[],
-        options?: { signal?: AbortSignal; mode?: Pick<CodexSessionConfig, 'model' | 'model_reasoning_effort' | 'approval-policy' | 'sandbox'> }
+        options?: {
+            signal?: AbortSignal;
+            mode?: Pick<CodexSessionConfig, 'model' | 'model_reasoning_effort' | 'approval-policy' | 'sandbox' | 'permissions' | 'collaboration_mode'>;
+        }
     ): Promise<CodexToolResponse> {
         if (!this.connected) await this.connect();
         if (!this.threadId) {
@@ -248,6 +315,16 @@ export class CodexAppServerClient {
             model: config.model ?? null,
             effort: config.model_reasoning_effort ?? null,
         };
+        const collaborationMode = collaborationModeParams(config);
+        if (collaborationMode) {
+            turnParams.collaborationMode = collaborationMode;
+        }
+        if (config.permissions) {
+            turnParams.permissions = config.permissions;
+        } else {
+            const sandboxPolicy = sandboxPolicyFromMode(config.sandbox);
+            if (sandboxPolicy) turnParams.sandboxPolicy = sandboxPolicy;
+        }
 
         const turnResponse: any = await this.rpcCall('turn/start', turnParams, signal);
         const turnId = turnResponse?.turn?.id;

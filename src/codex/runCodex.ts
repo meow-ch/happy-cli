@@ -766,10 +766,7 @@ export async function runCodex(opts: {
         await client.connect();
         logger.debug('[codex]: client.connect done');
         let wasCreated = false;
-        let currentModeHash: string | null = null;
         let pending: { message: string; mode: EnhancedMode; isolate: boolean; hash: string } | null = null;
-        // If we restart (e.g., mode change), use this to carry a resume file
-        let nextExperimentalResume: string | null = null;
 
         while (!shouldExit) {
             logActiveHandles('loop-top');
@@ -797,42 +794,10 @@ export async function runCodex(opts: {
                 break;
             }
 
-            // If a session exists and mode changed, restart on next iteration
-            if (wasCreated && currentModeHash && message.hash !== currentModeHash) {
-                logger.debug('[Codex] Mode changed – restarting Codex session');
-                messageBuffer.addMessage('═'.repeat(40), 'status');
-                messageBuffer.addMessage('Starting new Codex session (mode changed)...', 'status');
-                // Capture previous sessionId and try to find its transcript to resume
-                try {
-                    const prevSessionId = client.getSessionId();
-                    nextExperimentalResume = findCodexResumeFile(prevSessionId);
-                    if (nextExperimentalResume) {
-                        logger.debug(`[Codex] Found resume file for session ${prevSessionId}: ${nextExperimentalResume}`);
-                        messageBuffer.addMessage('Resuming previous context…', 'status');
-                    } else {
-                        logger.debug('[Codex] No resume file found for previous session');
-                    }
-                } catch (e) {
-                    logger.debug('[Codex] Error while searching resume file', e);
-                }
-                client.clearSession();
-                wasCreated = false;
-                currentModeHash = null;
-                pending = message;
-                // Reset processors/permissions like end-of-turn cleanup
-                permissionHandler.reset();
-                reasoningProcessor.abort();
-                diffProcessor.reset();
-                thinking = false;
-                session.keepAlive(thinking, 'remote');
-                continue;
-            }
-
             // Display user messages in the UI
             const imageCount = message.mode.images?.length ?? 0;
             const userDisplay = message.message || (imageCount > 0 ? `[${imageCount} image${imageCount === 1 ? '' : 's'}]` : '');
             messageBuffer.addMessage(userDisplay, 'user');
-            currentModeHash = message.hash;
 
             try {
                 const policy = resolveCodexExecutionPolicy({
@@ -872,14 +837,8 @@ export async function runCodex(opts: {
                     // Check for resume file from multiple sources
                     let resumeFile: string | null = null;
                     
-                    // Priority 1: Explicit resume file from mode change
-                    if (nextExperimentalResume) {
-                        resumeFile = nextExperimentalResume;
-                        nextExperimentalResume = null; // consume once
-                        logger.debug('[Codex] Using resume file from mode change:', resumeFile);
-                    }
-                    // Priority 2: Resume from stored abort session
-                    else if (storedSessionIdForResume) {
+                    // Resume from stored abort session
+                    if (storedSessionIdForResume) {
                         const abortResumeFile = findCodexResumeFile(storedSessionIdForResume);
                         if (abortResumeFile) {
                             resumeFile = abortResumeFile;

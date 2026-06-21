@@ -132,7 +132,7 @@ describe('machine session status RPC', () => {
             stopSession: () => false,
             sessionStatusList: (sessionIds) => sessionIds.map((sessionId) => ({
                 sessionId,
-                status: sessionId === 'sid_live' ? 'alive' : 'unknown',
+                status: sessionId === 'sid_live' ? 'tracked_alive' : 'unknown',
                 pid: sessionId === 'sid_live' ? 123 : undefined,
             })),
             requestShutdown: () => {},
@@ -142,10 +142,10 @@ describe('machine session status RPC', () => {
         expect(manager.hasHandler('session-status-list')).toBe(true);
         const handler = manager.handlers.get('machine_test:session-status-list');
 
-        expect(handler({ sessionIds: ['sid_live', '', 42, 'sid_missing'] })).toEqual({
+        await expect(handler({ sessionIds: ['sid_live', '', 42, 'sid_missing'] })).resolves.toEqual({
             success: true,
             sessions: [
-                { sessionId: 'sid_live', status: 'alive', pid: 123 },
+                { sessionId: 'sid_live', status: 'tracked_alive', pid: 123 },
                 { sessionId: 'sid_missing', status: 'unknown', pid: undefined },
             ],
         });

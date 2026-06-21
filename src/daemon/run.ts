@@ -17,12 +17,20 @@ import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquire
 
 import { cleanupDaemonState, isDaemonRunningCurrentlyInstalledHappyVersion, stopDaemon } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
+import { findAllHappyProcesses } from './doctor';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { getGlobalClaudeVersion, checkClaudeVersion } from '@/utils/claudeVersionCheck';
+import {
+  DaemonSessionStatus,
+  pidIsAlive,
+  pruneDeadDaemonSessionRecords,
+  removeDaemonSessionRecord,
+  upsertDaemonSessionRecord,
+} from './sessionRegistry';
 
 // Prepare initial metadata
 export const initialMachineMetadata: MachineMetadata = {
@@ -215,7 +223,47 @@ export async function startDaemon(): Promise<void> {
     let spawnInFlight = 0;
 
     // Helper functions
-    const getCurrentChildren = () => Array.from(pidToTrackedSession.values());
+    const isSessionProcessType = (type: string) => (
+      type === 'daemon-spawned-session'
+      || type === 'dev-daemon-spawned'
+      || type === 'user-session'
+      || type === 'dev-session'
+    );
+
+    const reconcilePersistedSessions = async () => {
+      const records = pruneDeadDaemonSessionRecords();
+      if (records.length === 0) return;
+
+      const processByPid = new Map(
+        (await findAllHappyProcesses())
+          .filter((proc) => isSessionProcessType(proc.type))
+          .map((proc) => [proc.pid, proc]),
+      );
+
+      for (const record of records) {
+        if (pidToTrackedSession.has(record.pid)) continue;
+        const proc = processByPid.get(record.pid);
+        if (!proc) {
+          removeDaemonSessionRecord({ sessionId: record.sessionId, pid: record.pid });
+          continue;
+        }
+
+        pidToTrackedSession.set(record.pid, {
+          startedBy: record.startedBy,
+          happySessionId: record.sessionId,
+          pid: record.pid,
+          trackingSource: 'registry',
+        });
+        logger.debug(`[DAEMON RUN] Re-adopted session ${record.sessionId} from registry PID ${record.pid}`);
+      }
+    };
+
+    const getCurrentChildren = async () => {
+      await reconcilePersistedSessions();
+      return Array.from(pidToTrackedSession.values());
+    };
+
+    await reconcilePersistedSessions();
 
     const beginTrackedSpawn = () => {
       spawnInFlight += 1;
@@ -244,6 +292,13 @@ export async function startDaemon(): Promise<void> {
         // Update daemon-spawned session with reported data
         existingSession.happySessionId = sessionId;
         existingSession.happySessionMetadataFromLocalWebhook = sessionMetadata;
+        existingSession.trackingSource = existingSession.trackingSource ?? 'memory';
+        upsertDaemonSessionRecord({
+          sessionId,
+          pid,
+          startedBy: existingSession.startedBy,
+          metadata: sessionMetadata,
+        });
         logger.debug(`[DAEMON RUN] Updated daemon-spawned session ${sessionId} with metadata`);
 
         // Resolve any awaiter for this PID
@@ -259,9 +314,16 @@ export async function startDaemon(): Promise<void> {
           startedBy: `${configuration.cliName} directly - likely by user from terminal`,
           happySessionId: sessionId,
           happySessionMetadataFromLocalWebhook: sessionMetadata,
-          pid
+          pid,
+          trackingSource: 'memory',
         };
         pidToTrackedSession.set(pid, trackedSession);
+        upsertDaemonSessionRecord({
+          sessionId,
+          pid,
+          startedBy: trackedSession.startedBy,
+          metadata: sessionMetadata,
+        });
         logger.debug(`[DAEMON RUN] Registered externally-started session ${sessionId}`);
       }
     };
@@ -481,6 +543,7 @@ export async function startDaemon(): Promise<void> {
             const trackedSession: TrackedSession = {
               startedBy: 'daemon',
               pid: tmuxResult.pid, // Real PID from tmux -P flag
+              trackingSource: 'memory',
               tmuxSessionId: tmuxResult.sessionId,
               directoryCreated,
               message: directoryCreated
@@ -585,6 +648,7 @@ export async function startDaemon(): Promise<void> {
           const trackedSession: TrackedSession = {
             startedBy: 'daemon',
             pid: happyProcess.pid,
+            trackingSource: 'memory',
             childProcess: happyProcess,
             directoryCreated,
             message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
@@ -678,6 +742,7 @@ export async function startDaemon(): Promise<void> {
           }
 
           pidToTrackedSession.delete(pid);
+          removeDaemonSessionRecord({ sessionId, pid });
           logger.debug(`[DAEMON RUN] Removed session ${sessionId} from tracking`);
           return true;
         }
@@ -687,27 +752,37 @@ export async function startDaemon(): Promise<void> {
       return false;
     };
 
-    const sessionStatusList = (sessionIds: string[]) => {
+    const sessionStatusForTracked = (
+      sessionId: string,
+      pid: number,
+      session: TrackedSession,
+    ): {
+      sessionId: string;
+      status: DaemonSessionStatus;
+      pid: number;
+      startedBy: string;
+      trackingSource: 'memory' | 'registry';
+    } => {
+      const trackingSource = session.trackingSource ?? 'memory';
+      const alive = pidIsAlive(pid);
+      return {
+        sessionId,
+        status: alive
+          ? (trackingSource === 'registry' ? 'recovered_alive' : 'tracked_alive')
+          : (trackingSource === 'registry' ? 'recovered_dead' : 'tracked_dead'),
+        pid,
+        startedBy: session.startedBy,
+        trackingSource,
+      };
+    };
+
+    const sessionStatusList = async (sessionIds: string[]) => {
+      await reconcilePersistedSessions();
       return sessionIds.map((sessionId) => {
         for (const [pid, session] of pidToTrackedSession.entries()) {
           if (session.happySessionId === sessionId ||
             (sessionId.startsWith('PID-') && pid === parseInt(sessionId.replace('PID-', '')))) {
-            try {
-              process.kill(pid, 0);
-              return {
-                sessionId,
-                status: 'alive' as const,
-                pid,
-                startedBy: session.startedBy,
-              };
-            } catch {
-              return {
-                sessionId,
-                status: 'dead' as const,
-                pid,
-                startedBy: session.startedBy,
-              };
-            }
+            return sessionStatusForTracked(sessionId, pid, session);
           }
         }
         return { sessionId, status: 'unknown' as const };
@@ -718,6 +793,7 @@ export async function startDaemon(): Promise<void> {
     const onChildExited = (pid: number) => {
       logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
       pidToTrackedSession.delete(pid);
+      removeDaemonSessionRecord({ pid });
     };
 
     // Start control server
@@ -799,6 +875,7 @@ export async function startDaemon(): Promise<void> {
           // Process is dead, remove from tracking
           logger.debug(`[DAEMON RUN] Removing stale session with PID ${pid} (process no longer exists)`);
           pidToTrackedSession.delete(pid);
+          removeDaemonSessionRecord({ pid });
         }
       }
 

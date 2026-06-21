@@ -19,4 +19,6 @@ export interface TrackedSession {
   message?: string;
   /** tmux session identifier (format: session:window) */
   tmuxSessionId?: string;
+  /** Whether this daemon observed the spawn directly or re-adopted it from durable registry. */
+  trackingSource?: 'memory' | 'registry';
 }

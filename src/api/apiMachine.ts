@@ -12,6 +12,7 @@ import { encodeBase64, decodeBase64, encrypt, decrypt } from './encryption';
 import { backoff } from '@/utils/time';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { prepareAgentPlaneSession, PrepareAgentPlaneSessionRequest, PrepareAgentPlaneSessionResponse } from './agentPlaneSessionPrep';
+import type { DaemonSessionStatus } from '@/daemon/sessionRegistry';
 
 interface ServerToDaemonEvents {
     update: (data: Update) => void;
@@ -75,10 +76,17 @@ type MachineRpcHandlers = {
     stopSession: (sessionId: string) => boolean;
     sessionStatusList: (sessionIds: string[]) => Array<{
         sessionId: string;
-        status: 'alive' | 'dead' | 'unknown';
+        status: DaemonSessionStatus;
         pid?: number;
         startedBy?: string;
-    }>;
+        trackingSource?: 'memory' | 'registry';
+    }> | Promise<Array<{
+        sessionId: string;
+        status: DaemonSessionStatus;
+        pid?: number;
+        startedBy?: string;
+        trackingSource?: 'memory' | 'registry';
+    }>>;
     requestShutdown: () => void;
 }
 
@@ -154,13 +162,13 @@ export class ApiMachineClient {
             return { message: 'Session stopped' };
         });
 
-        this.rpcHandlerManager.registerHandler('session-status-list', (params: any) => {
+        this.rpcHandlerManager.registerHandler('session-status-list', async (params: any) => {
             const sessionIds = Array.isArray(params?.sessionIds)
                 ? params.sessionIds.filter((item: unknown): item is string => typeof item === 'string' && item.length > 0)
                 : [];
             return {
                 success: true,
-                sessions: sessionStatusList(sessionIds),
+                sessions: await sessionStatusList(sessionIds),
             };
         });
 

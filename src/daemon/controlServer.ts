@@ -18,7 +18,7 @@ export function startDaemonControlServer({
   requestShutdown,
   onHappySessionWebhook
 }: {
-  getChildren: () => TrackedSession[];
+  getChildren: () => TrackedSession[] | Promise<TrackedSession[]>;
   stopSession: (sessionId: string) => boolean;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   requestShutdown: () => void;
@@ -70,7 +70,7 @@ export function startDaemonControlServer({
         }
       }
     }, async () => {
-      const children = getChildren();
+      const children = await getChildren();
       logger.debug(`[CONTROL SERVER] Listing ${children.length} sessions`);
       return { 
         children: children

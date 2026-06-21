@@ -73,6 +73,12 @@ interface DaemonToServerEvents {
 type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
     stopSession: (sessionId: string) => boolean;
+    sessionStatusList: (sessionIds: string[]) => Array<{
+        sessionId: string;
+        status: 'alive' | 'dead' | 'unknown';
+        pid?: number;
+        startedBy?: string;
+    }>;
     requestShutdown: () => void;
 }
 
@@ -103,6 +109,7 @@ export class ApiMachineClient {
     setRPCHandlers({
         spawnSession,
         stopSession,
+        sessionStatusList,
         requestShutdown
     }: MachineRpcHandlers) {
         // Register spawn session handler
@@ -145,6 +152,16 @@ export class ApiMachineClient {
 
             logger.debug(`[API MACHINE] Stopped session ${sessionId}`);
             return { message: 'Session stopped' };
+        });
+
+        this.rpcHandlerManager.registerHandler('session-status-list', (params: any) => {
+            const sessionIds = Array.isArray(params?.sessionIds)
+                ? params.sessionIds.filter((item: unknown): item is string => typeof item === 'string' && item.length > 0)
+                : [];
+            return {
+                success: true,
+                sessions: sessionStatusList(sessionIds),
+            };
         });
 
         // Register stop daemon handler

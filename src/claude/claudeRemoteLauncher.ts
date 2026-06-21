@@ -23,6 +23,28 @@ interface PermissionsField {
     allowedTools?: string[];
 }
 
+function extractClaudePlanText(input: unknown): string {
+    if (typeof input === 'string') return input.trim();
+    if (Array.isArray(input)) {
+        return input.map(extractClaudePlanText).filter(Boolean).join('\n\n').trim();
+    }
+    if (!input || typeof input !== 'object') return '';
+    const raw = input as Record<string, unknown>;
+    for (const key of ['plan', 'content', 'text', 'message', 'description']) {
+        const value = raw[key];
+        if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    try {
+        return JSON.stringify(raw, null, 2);
+    } catch {
+        return '';
+    }
+}
+
+export const __testClaudeRemoteLauncherInternals = {
+    extractClaudePlanText,
+};
+
 function formatUnexpectedClaudeExit(error: unknown): string {
     const detail = error instanceof Error ? error.message : String(error ?? '');
     const normalized = detail.toLowerCase();
@@ -143,6 +165,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
     // Handle messages
     let planModeToolCalls = new Set<string>();
+    let emittedPlanToolCalls = new Set<string>();
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
 
     function onMessage(message: SDKMessage) {
@@ -161,6 +184,20 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     if (c.type === 'tool_use' && (c.name === 'exit_plan_mode' || c.name === 'ExitPlanMode')) {
                         logger.debug('[remote]: detected plan mode tool call ' + c.id!);
                         planModeToolCalls.add(c.id! as string);
+                        if (c.id && !emittedPlanToolCalls.has(c.id as string)) {
+                            const text = extractClaudePlanText(c.input);
+                            if (text) {
+                                emittedPlanToolCalls.add(c.id as string);
+                                session.client.sendAgentMessage('claude', {
+                                    type: 'plan',
+                                    id: c.id as string,
+                                    text,
+                                    explanation: null,
+                                    steps: [],
+                                    status: 'complete',
+                                });
+                            }
+                        }
                     }
                 }
             }

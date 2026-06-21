@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { ApiMachineClient } from './apiMachine';
 import { __testAgentPlaneSessionPrep } from './agentPlaneSessionPrep';
 
 describe('Agent Plane session preparation RPC', () => {
@@ -110,5 +111,43 @@ describe('Agent Plane session preparation RPC', () => {
 
         await rm(directory, { recursive: true, force: true });
         await rm(outside, { recursive: true, force: true });
+    });
+});
+
+describe('machine session status RPC', () => {
+    it('registers session-status-list and delegates to daemon session tracking', async () => {
+        const client = new ApiMachineClient('token', {
+            id: 'machine_test',
+            name: 'machine_test',
+            encryptionKey: new Uint8Array(32),
+            encryptionVariant: 'legacy',
+            metadata: null,
+            metadataVersion: 0,
+            daemonState: null,
+            daemonStateVersion: 0,
+        } as any);
+
+        client.setRPCHandlers({
+            spawnSession: async () => ({ type: 'error', errorMessage: 'not used' }),
+            stopSession: () => false,
+            sessionStatusList: (sessionIds) => sessionIds.map((sessionId) => ({
+                sessionId,
+                status: sessionId === 'sid_live' ? 'alive' : 'unknown',
+                pid: sessionId === 'sid_live' ? 123 : undefined,
+            })),
+            requestShutdown: () => {},
+        });
+
+        const manager = (client as any).rpcHandlerManager;
+        expect(manager.hasHandler('session-status-list')).toBe(true);
+        const handler = manager.handlers.get('machine_test:session-status-list');
+
+        expect(handler({ sessionIds: ['sid_live', '', 42, 'sid_missing'] })).toEqual({
+            success: true,
+            sessions: [
+                { sessionId: 'sid_live', status: 'alive', pid: 123 },
+                { sessionId: 'sid_missing', status: 'unknown', pid: undefined },
+            ],
+        });
     });
 });

@@ -66,6 +66,36 @@ function collaborationModeParams(config: Partial<CodexSessionConfig>): Record<st
     };
 }
 
+function normalizePlanSteps(value: unknown): Array<{ step: string; status?: string | null }> {
+    if (!Array.isArray(value)) return [];
+    return value
+        .map((item) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+            const raw = item as Record<string, unknown>;
+            const step = typeof raw.step === 'string' ? raw.step.trim() : '';
+            if (!step) return null;
+            return {
+                step,
+                status: typeof raw.status === 'string' ? raw.status : null,
+            };
+        })
+        .filter((item): item is { step: string; status: string | null } => item !== null);
+}
+
+function planTextFromParts(explanation: unknown, steps: Array<{ step: string; status?: string | null }>): string {
+    const chunks: string[] = [];
+    if (typeof explanation === 'string' && explanation.trim()) chunks.push(explanation.trim());
+    if (steps.length > 0) {
+        chunks.push(steps.map((item) => `- ${item.step}`).join('\n'));
+    }
+    return chunks.join('\n\n');
+}
+
+export const __testCodexAppServerClientInternals = {
+    normalizePlanSteps,
+    planTextFromParts,
+};
+
 function asError(error: unknown): Error {
     if (error instanceof Error) return error;
     return new Error(String(error ?? 'Unknown error'));
@@ -573,6 +603,29 @@ export class CodexAppServerClient {
                 }
                 return;
             }
+            case 'turn/plan/updated': {
+                const steps = normalizePlanSteps(params?.plan);
+                const explanation = typeof params?.explanation === 'string' ? params.explanation : null;
+                this.handler?.({
+                    type: 'plan_update',
+                    call_id: typeof params?.turnId === 'string' ? params.turnId : `plan_${Date.now()}`,
+                    text: planTextFromParts(explanation, steps),
+                    explanation,
+                    steps,
+                    status: 'updated',
+                });
+                return;
+            }
+            case 'item/plan/delta': {
+                if (typeof params?.delta === 'string' && params.delta) {
+                    this.handler?.({
+                        type: 'plan_delta',
+                        call_id: typeof params?.itemId === 'string' ? params.itemId : `plan_${Date.now()}`,
+                        delta: params.delta,
+                    });
+                }
+                return;
+            }
             case 'error': {
                 this.handler?.({
                     type: 'error',
@@ -588,6 +641,18 @@ export class CodexAppServerClient {
 
         if (item.type === 'agentMessage' && phase === 'completed' && typeof item.text === 'string') {
             this.handler?.({ type: 'agent_message', message: item.text });
+            return;
+        }
+
+        if (item.type === 'plan' && phase === 'completed' && typeof item.text === 'string') {
+            this.handler?.({
+                type: 'plan_update',
+                call_id: typeof item.id === 'string' ? item.id : `plan_${Date.now()}`,
+                text: item.text,
+                explanation: null,
+                steps: [],
+                status: 'complete',
+            });
             return;
         }
 

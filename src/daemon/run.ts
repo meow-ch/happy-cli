@@ -687,6 +687,33 @@ export async function startDaemon(): Promise<void> {
       return false;
     };
 
+    const sessionStatusList = (sessionIds: string[]) => {
+      return sessionIds.map((sessionId) => {
+        for (const [pid, session] of pidToTrackedSession.entries()) {
+          if (session.happySessionId === sessionId ||
+            (sessionId.startsWith('PID-') && pid === parseInt(sessionId.replace('PID-', '')))) {
+            try {
+              process.kill(pid, 0);
+              return {
+                sessionId,
+                status: 'alive' as const,
+                pid,
+                startedBy: session.startedBy,
+              };
+            } catch {
+              return {
+                sessionId,
+                status: 'dead' as const,
+                pid,
+                startedBy: session.startedBy,
+              };
+            }
+          }
+        }
+        return { sessionId, status: 'unknown' as const };
+      });
+    };
+
     // Handle child process exit
     const onChildExited = (pid: number) => {
       logger.debug(`[DAEMON RUN] Removing exited process PID ${pid} from tracking`);
@@ -739,6 +766,7 @@ export async function startDaemon(): Promise<void> {
     apiMachine.setRPCHandlers({
       spawnSession,
       stopSession,
+      sessionStatusList,
       requestShutdown: () => requestShutdown('happy-app')
     });
 

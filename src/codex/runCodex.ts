@@ -601,6 +601,8 @@ export async function runCodex(opts: {
         } else if (msg.type === 'turn_aborted') {
             messageBuffer.addMessage('Turn aborted', 'status');
             sendReady();
+        } else if (msg.type === 'plan_update') {
+            messageBuffer.addMessage('Plan updated', 'status');
         }
 
         if (msg.type === 'task_started') {
@@ -636,6 +638,23 @@ export async function runCodex(opts: {
                 type: 'message',
                 message: msg.message,
                 id: randomUUID()
+            });
+        }
+        if (msg.type === 'plan_update') {
+            session.sendAgentMessage('codex', {
+                type: 'plan',
+                id: String(msg.call_id ?? randomUUID()),
+                text: typeof msg.text === 'string' ? msg.text : '',
+                explanation: typeof msg.explanation === 'string' ? msg.explanation : null,
+                steps: Array.isArray(msg.steps) ? msg.steps : [],
+                status: msg.status === 'updated' ? 'updated' : 'complete',
+            });
+        }
+        if (msg.type === 'plan_delta') {
+            session.sendAgentMessage('codex', {
+                type: 'plan_delta',
+                id: String(msg.call_id ?? randomUUID()),
+                delta: String(msg.delta ?? ''),
             });
         }
         if (msg.type === 'exec_command_begin' || msg.type === 'exec_approval_request') {

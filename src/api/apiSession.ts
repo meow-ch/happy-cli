@@ -21,6 +21,15 @@ export type ACPMessageData =
     | { type: 'message'; message: string }
     | { type: 'reasoning'; message: string }
     | { type: 'thinking'; text: string }
+    | {
+        type: 'plan';
+        id: string;
+        text?: string;
+        explanation?: string | null;
+        steps?: Array<{ step: string; status?: string | null }>;
+        status?: 'updated' | 'complete';
+      }
+    | { type: 'plan_delta'; id: string; delta: string }
     // Tool interactions
     | { type: 'tool-call'; callId: string; name: string; input: unknown; id: string }
     | { type: 'tool-result'; callId: string; output: unknown; id: string; isError?: boolean }

@@ -606,6 +606,10 @@ export async function runCodex(opts: {
         }
 
         if (msg.type === 'task_started') {
+            session.sendAgentMessage('codex', {
+                type: 'task_started',
+                id: typeof msg.turn_id === 'string' ? msg.turn_id : randomUUID(),
+            });
             if (!thinking) {
                 logger.debug('thinking started');
                 thinking = true;
@@ -613,6 +617,10 @@ export async function runCodex(opts: {
             }
         }
         if (msg.type === 'task_complete' || msg.type === 'turn_aborted') {
+            session.sendAgentMessage('codex', {
+                type: msg.type,
+                id: typeof msg.turn_id === 'string' ? msg.turn_id : randomUUID(),
+            });
             if (thinking) {
                 logger.debug('thinking completed');
                 thinking = false;

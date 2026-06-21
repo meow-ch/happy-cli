@@ -19,3 +19,19 @@ describe('Codex app-server plan normalization', () => {
             .toBe('Need two actions.\n\n- Inspect the code\n- Patch the UI');
     });
 });
+
+describe('Codex app-server turn lifecycle normalization', () => {
+    it('maps native turn completions to provider-neutral task lifecycle events', () => {
+        expect(__testCodexAppServerClientInternals.turnLifecycleEventFromCompletion({
+            turn: { id: 'turn_complete_1', status: 'completed' },
+        })).toEqual({ type: 'task_complete', turn_id: 'turn_complete_1' });
+
+        expect(__testCodexAppServerClientInternals.turnLifecycleEventFromCompletion({
+            turn: { id: 'turn_abort_1', status: 'interrupted' },
+        })).toEqual({ type: 'turn_aborted', turn_id: 'turn_abort_1' });
+
+        expect(__testCodexAppServerClientInternals.turnLifecycleEventFromCompletion({
+            turn: { status: 'completed' },
+        })).toEqual({ type: 'task_complete' });
+    });
+});

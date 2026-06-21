@@ -91,9 +91,19 @@ function planTextFromParts(explanation: unknown, steps: Array<{ step: string; st
     return chunks.join('\n\n');
 }
 
+function turnLifecycleEventFromCompletion(params: any): { type: 'task_complete' | 'turn_aborted'; turn_id?: string } {
+    const turn = params?.turn;
+    const event = {
+        type: turn?.status === 'interrupted' ? 'turn_aborted' : 'task_complete',
+    } as { type: 'task_complete' | 'turn_aborted'; turn_id?: string };
+    if (typeof turn?.id === 'string') event.turn_id = turn.id;
+    return event;
+}
+
 export const __testCodexAppServerClientInternals = {
     normalizePlanSteps,
     planTextFromParts,
+    turnLifecycleEventFromCompletion,
 };
 
 function asError(error: unknown): Error {
@@ -728,19 +738,19 @@ export class CodexAppServerClient {
         };
 
         if (typeof turnId !== 'string') {
-            this.handler?.({ type: 'task_complete' });
+            this.handler?.(turnLifecycleEventFromCompletion(params));
             return;
         }
 
         const pending = this.pendingTurns.get(turnId);
         if (!pending) {
             this.completedTurns.set(turnId, response);
-            this.handler?.({ type: 'task_complete' });
+            this.handler?.(turnLifecycleEventFromCompletion(params));
             return;
         }
 
         this.pendingTurns.delete(turnId);
-        this.handler?.({ type: status === 'interrupted' ? 'turn_aborted' : 'task_complete' });
+        this.handler?.(turnLifecycleEventFromCompletion(params));
         pending.resolve(response);
     }
 

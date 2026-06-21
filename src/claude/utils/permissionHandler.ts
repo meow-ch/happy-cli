@@ -16,6 +16,8 @@ import { EnhancedMode, PermissionMode } from "../loop";
 import { getToolDescriptor } from "./getToolDescriptor";
 import { delay } from "@/utils/time";
 import type {
+    AgentPlanDecision,
+    AgentPlanDecisionAction,
     AgentQuestionnaire,
     AgentQuestionnaireAnswerMap,
     AgentQuestionnaireQuestion
@@ -50,6 +52,12 @@ interface QuestionnaireResult {
     status: 'answered' | 'expired' | 'canceled';
 }
 
+interface PlanDecisionResponse {
+    id: string;
+    decision: AgentPlanDecisionAction;
+    feedback?: string;
+}
+
 interface PendingQuestionnaireRequest {
     resolve: (value: QuestionnaireResult) => void;
     reject: (error: Error) => void;
@@ -79,6 +87,30 @@ export class PermissionHandler {
      */
     setOnPermissionRequest(callback: (toolCallId: string) => void) {
         this.onPermissionRequestCallback = callback;
+    }
+
+    private planDecisionFromInput(id: string, input: unknown): AgentPlanDecision {
+        const raw = input && typeof input === 'object' && !Array.isArray(input)
+            ? input as Record<string, unknown>
+            : {};
+        const planText =
+            typeof raw.plan === 'string' ? raw.plan
+            : typeof raw.text === 'string' ? raw.text
+            : typeof raw.content === 'string' ? raw.content
+            : '';
+        return {
+            provider: 'claude',
+            planId: id,
+            actions: ['approve', 'stay_in_plan'],
+            plan: {
+                id,
+                provider: 'claude',
+                text: planText,
+                explanation: null,
+                steps: [],
+                status: 'complete',
+            },
+        };
     }
 
     handleModeChange(mode: PermissionMode) {
@@ -228,6 +260,9 @@ export class PermissionHandler {
         signal: AbortSignal
     ): Promise<PermissionResult> {
         return new Promise<PermissionResult>((resolve, reject) => {
+            const isPlanDecision = toolName === 'exit_plan_mode' || toolName === 'ExitPlanMode';
+            const planDecision = isPlanDecision ? this.planDecisionFromInput(id, input) : null;
+
             // Set up abort signal handling
             const abortHandler = () => {
                 this.pendingRequests.delete(id);
@@ -272,8 +307,10 @@ export class PermissionHandler {
                 requests: {
                     ...currentState.requests,
                     [id]: {
+                        kind: isPlanDecision ? 'plan_decision' : 'permission',
                         tool: toolName,
-                        arguments: input,
+                        arguments: planDecision ?? input,
+                        ...(planDecision ? { planDecision } : {}),
                         createdAt: Date.now()
                     }
                 }
@@ -595,6 +632,57 @@ export class PermissionHandler {
                             completedAt: Date.now(),
                             status: result.status,
                             answers: result.answers
+                        }
+                    }
+                };
+            });
+        });
+
+        this.session.client.rpcHandlerManager.registerHandler<PlanDecisionResponse, void>('plan-decision', async (message) => {
+            logger.debug(`Plan decision response: ${JSON.stringify({
+                id: message.id,
+                decision: message.decision
+            })}`);
+
+            const id = message.id;
+            const pending = this.pendingRequests.get(id);
+
+            if (!pending) {
+                logger.debug('Plan decision request not found or already resolved');
+                return;
+            }
+
+            this.pendingRequests.delete(id);
+            const approved = message.decision === 'approve';
+            const response: PermissionResponse = {
+                id,
+                approved,
+                reason: approved ? undefined : (message.feedback || 'Stay in plan mode.'),
+                mode: approved ? 'default' : 'plan',
+                receivedAt: Date.now()
+            };
+            this.responses.set(id, response);
+
+            this.handlePermissionResponse(response, pending);
+
+            this.session.client.updateAgentState((currentState) => {
+                const request = currentState.requests?.[id];
+                if (!request) return currentState;
+                let r = { ...currentState.requests };
+                delete r[id];
+                return {
+                    ...currentState,
+                    requests: r,
+                    completedRequests: {
+                        ...currentState.completedRequests,
+                        [id]: {
+                            ...request,
+                            completedAt: Date.now(),
+                            status: approved ? 'approved' : 'stayed_in_plan',
+                            reason: response.reason,
+                            mode: response.mode,
+                            planDecisionResult: message.decision,
+                            feedback: message.feedback
                         }
                     }
                 };

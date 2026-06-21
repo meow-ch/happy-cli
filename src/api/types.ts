@@ -382,7 +382,7 @@ export type Metadata = {
   flavor?: string
 };
 
-export type AgentRequestKind = 'permission' | 'questionnaire'
+export type AgentRequestKind = 'permission' | 'questionnaire' | 'plan_decision'
 
 export type AgentQuestionnaireOption = {
   label: string
@@ -411,22 +411,43 @@ export type AgentQuestionnaireAnswer = {
 
 export type AgentQuestionnaireAnswerMap = Record<string, AgentQuestionnaireAnswer>
 
+export type AgentPlanDecisionAction = 'approve' | 'stay_in_plan'
+
+export type AgentPlanDecisionPlan = {
+  id: string
+  provider?: 'claude' | 'codex' | string
+  text?: string
+  explanation?: string | null
+  steps?: Array<{ step: string; status?: string | null }>
+  status?: 'updated' | 'complete'
+}
+
+export type AgentPlanDecision = {
+  provider: 'claude' | 'codex' | string
+  planId: string
+  plan?: AgentPlanDecisionPlan
+  actions: AgentPlanDecisionAction[]
+}
+
 export type AgentStateRequest = {
   kind?: AgentRequestKind
   tool: string,
   arguments: any,
   createdAt: number,
   questionnaire?: AgentQuestionnaire
+  planDecision?: AgentPlanDecision
 }
 
 export type AgentStateCompletedRequest = AgentStateRequest & {
   completedAt: number,
-  status: 'canceled' | 'denied' | 'approved' | 'answered' | 'expired',
+  status: 'canceled' | 'denied' | 'approved' | 'answered' | 'expired' | 'stayed_in_plan',
   reason?: string,
   mode?: PermissionMode,
   decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort',
   allowTools?: string[],
   answers?: AgentQuestionnaireAnswerMap
+  planDecisionResult?: AgentPlanDecisionAction
+  feedback?: string
 }
 
 export type AgentState = {

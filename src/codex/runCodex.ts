@@ -46,6 +46,7 @@ import { stopCaffeinate } from "@/utils/caffeinate";
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import type { ApiSessionClient } from '@/api/apiSession';
+import type { AgentPlanDecision } from '@/api/types';
 
 type ReadyEventOptions = {
     pending: unknown;
@@ -106,6 +107,10 @@ export async function runCodex(opts: {
         reasoningEffort?: string;
         images?: CodexImageContent[];
     }
+    type CompletedPlanForDecision = {
+        requestId: string;
+        planDecision: AgentPlanDecision;
+    };
 
     //
     // Define session
@@ -574,6 +579,50 @@ export async function runCodex(opts: {
         session.sendCodexMessage(message);
     });
     client.setPermissionHandler(permissionHandler);
+    const completedPlanForDecision: { current: CompletedPlanForDecision | null } = { current: null };
+    let deferredCompletionEvent: { type: 'task_complete' | 'turn_aborted'; id: string } | null = null;
+    const rememberCompletedPlanForDecision = (input: {
+        id: string;
+        text?: string;
+        explanation?: string | null;
+        steps?: Array<{ step: string; status?: string | null }>;
+        status?: 'updated' | 'complete';
+    }) => {
+        if (input.status !== 'complete') return;
+        const planId = String(input.id || randomUUID());
+        completedPlanForDecision.current = {
+            requestId: `${planId}:decision`,
+            planDecision: {
+                provider: 'codex',
+                planId,
+                actions: ['approve', 'stay_in_plan'],
+                plan: {
+                    id: planId,
+                    provider: 'codex',
+                    text: input.text,
+                    explanation: input.explanation ?? null,
+                    steps: Array.isArray(input.steps) ? input.steps : [],
+                    status: 'complete',
+                },
+            },
+        };
+    };
+    const consumeCompletedPlanForDecision = (): CompletedPlanForDecision | null => {
+        const plan = completedPlanForDecision.current;
+        completedPlanForDecision.current = null;
+        return plan;
+    };
+    const modeForPlanDecision = (
+        baseMode: EnhancedMode,
+        decision: 'approve' | 'stay_in_plan',
+    ): EnhancedMode => ({
+        ...baseMode,
+        runtimeMode: decision === 'approve' ? 'default' : 'plan',
+        collaborationMode: decision === 'approve' ? 'default' : 'plan',
+    });
+    const sendCompletionEvent = (event: { type: 'task_complete' | 'turn_aborted'; id: string }) => {
+        session.sendAgentMessage('codex', event);
+    };
     client.setHandler((msg) => {
         logger.debug(`[Codex] MCP message: ${JSON.stringify(msg)}`);
 
@@ -617,10 +666,10 @@ export async function runCodex(opts: {
             }
         }
         if (msg.type === 'task_complete' || msg.type === 'turn_aborted') {
-            session.sendAgentMessage('codex', {
+            const completionEvent = {
                 type: msg.type,
                 id: typeof msg.turn_id === 'string' ? msg.turn_id : randomUUID(),
-            });
+            };
             if (thinking) {
                 logger.debug('thinking completed');
                 thinking = false;
@@ -628,6 +677,11 @@ export async function runCodex(opts: {
             }
             // Reset diff processor on task end or abort
             diffProcessor.reset();
+            if (msg.type === 'task_complete' && completedPlanForDecision.current) {
+                deferredCompletionEvent = completionEvent;
+                return;
+            }
+            sendCompletionEvent(completionEvent);
         }
         if (msg.type === 'agent_reasoning_section_break') {
             // Reset reasoning processor for new section
@@ -649,9 +703,17 @@ export async function runCodex(opts: {
             });
         }
         if (msg.type === 'plan_update') {
+            const planId = String(msg.call_id ?? randomUUID());
+            rememberCompletedPlanForDecision({
+                id: planId,
+                text: typeof msg.text === 'string' ? msg.text : '',
+                explanation: typeof msg.explanation === 'string' ? msg.explanation : null,
+                steps: Array.isArray(msg.steps) ? msg.steps : [],
+                status: msg.status === 'updated' ? 'updated' : 'complete',
+            });
             session.sendAgentMessage('codex', {
                 type: 'plan',
-                id: String(msg.call_id ?? randomUUID()),
+                id: planId,
                 text: typeof msg.text === 'string' ? msg.text : '',
                 explanation: typeof msg.explanation === 'string' ? msg.explanation : null,
                 steps: Array.isArray(msg.steps) ? msg.steps : [],
@@ -825,6 +887,8 @@ export async function runCodex(opts: {
             const imageCount = message.mode.images?.length ?? 0;
             const userDisplay = message.message || (imageCount > 0 ? `[${imageCount} image${imageCount === 1 ? '' : 's'}]` : '');
             messageBuffer.addMessage(userDisplay, 'user');
+            completedPlanForDecision.current = null;
+            deferredCompletionEvent = null;
 
             try {
                 const policy = resolveCodexExecutionPolicy({
@@ -904,6 +968,29 @@ export async function runCodex(opts: {
                         }
                     );
                     logger.debug('[Codex] continueSession response:', response);
+                }
+                const planRequest = consumeCompletedPlanForDecision();
+                if (planRequest) {
+                    const decision = await permissionHandler.handlePlanDecisionRequest(
+                        planRequest.requestId,
+                        'PlanDecision',
+                        planRequest.planDecision,
+                    );
+                    const feedback = typeof decision.feedback === 'string' ? decision.feedback.trim() : '';
+                    if (decision.decision === 'approve') {
+                        messageQueue.unshift(
+                            feedback || 'Proceed with the approved plan.',
+                            modeForPlanDecision(message.mode, 'approve'),
+                        );
+                    } else if (feedback) {
+                        messageQueue.unshift(
+                            feedback,
+                            modeForPlanDecision(message.mode, 'stay_in_plan'),
+                        );
+                    } else if (deferredCompletionEvent) {
+                        sendCompletionEvent(deferredCompletionEvent);
+                    }
+                    deferredCompletionEvent = null;
                 }
             } catch (error) {
                 logger.warn('Error in codex session:', error);

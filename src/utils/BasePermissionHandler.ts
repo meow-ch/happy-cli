@@ -9,7 +9,13 @@
 
 import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
-import { AgentQuestionnaire, AgentQuestionnaireAnswerMap, AgentState } from "@/api/types";
+import {
+    AgentPlanDecision,
+    AgentPlanDecisionAction,
+    AgentQuestionnaire,
+    AgentQuestionnaireAnswerMap,
+    AgentState
+} from "@/api/types";
 
 /**
  * Permission response from the mobile app.
@@ -55,6 +61,24 @@ export interface QuestionnaireResult {
     status: 'answered' | 'expired' | 'canceled';
 }
 
+export interface PlanDecisionResponse {
+    id: string;
+    decision: AgentPlanDecisionAction;
+    feedback?: string;
+}
+
+export interface PendingPlanDecisionRequest {
+    resolve: (value: PlanDecisionResult) => void;
+    reject: (error: Error) => void;
+    toolName: string;
+    planDecision: AgentPlanDecision;
+}
+
+export interface PlanDecisionResult {
+    decision: AgentPlanDecisionAction;
+    feedback?: string;
+}
+
 /**
  * Abstract base class for permission handlers.
  *
@@ -64,6 +88,7 @@ export interface QuestionnaireResult {
 export abstract class BasePermissionHandler {
     protected pendingRequests = new Map<string, PendingRequest>();
     protected pendingQuestionnaires = new Map<string, PendingQuestionnaireRequest>();
+    protected pendingPlanDecisions = new Map<string, PendingPlanDecisionRequest>();
     protected session: ApiSessionClient;
     private isResetting = false;
 
@@ -180,6 +205,50 @@ export abstract class BasePermissionHandler {
                 logger.debug(`${this.getLogPrefix()} Questionnaire ${result.status} for ${pending.toolName}`);
             }
         );
+
+        this.session.rpcHandlerManager.registerHandler<PlanDecisionResponse, void>(
+            'plan-decision',
+            async (response) => {
+                const pending = this.pendingPlanDecisions.get(response.id);
+                if (!pending) {
+                    logger.debug(`${this.getLogPrefix()} Plan decision request not found or already resolved`);
+                    return;
+                }
+
+                this.pendingPlanDecisions.delete(response.id);
+
+                const result: PlanDecisionResult = {
+                    decision: response.decision === 'approve' ? 'approve' : 'stay_in_plan',
+                    feedback: typeof response.feedback === 'string' ? response.feedback : undefined,
+                };
+
+                pending.resolve(result);
+
+                this.session.updateAgentState((currentState) => {
+                    const request = currentState.requests?.[response.id];
+                    if (!request) return currentState;
+
+                    const { [response.id]: _, ...remainingRequests } = currentState.requests || {};
+
+                    return {
+                        ...currentState,
+                        requests: remainingRequests,
+                        completedRequests: {
+                            ...currentState.completedRequests,
+                            [response.id]: {
+                                ...request,
+                                completedAt: Date.now(),
+                                status: result.decision === 'approve' ? 'approved' : 'stayed_in_plan',
+                                planDecisionResult: result.decision,
+                                feedback: result.feedback,
+                            }
+                        }
+                    } satisfies AgentState;
+                });
+
+                logger.debug(`${this.getLogPrefix()} Plan decision ${result.decision} for ${pending.toolName}`);
+            }
+        );
     }
 
     /**
@@ -216,6 +285,22 @@ export abstract class BasePermissionHandler {
         }));
     }
 
+    protected addPendingPlanDecisionToState(requestId: string, toolName: string, planDecision: AgentPlanDecision): void {
+        this.session.updateAgentState((currentState) => ({
+            ...currentState,
+            requests: {
+                ...currentState.requests,
+                [requestId]: {
+                    kind: 'plan_decision',
+                    tool: toolName,
+                    arguments: planDecision,
+                    planDecision,
+                    createdAt: Date.now()
+                }
+            }
+        }));
+    }
+
     async handleQuestionnaireRequest(
         requestId: string,
         toolName: string,
@@ -235,6 +320,25 @@ export abstract class BasePermissionHandler {
         });
     }
 
+    async handlePlanDecisionRequest(
+        requestId: string,
+        toolName: string,
+        planDecision: AgentPlanDecision
+    ): Promise<PlanDecisionResult> {
+        return new Promise<PlanDecisionResult>((resolve, reject) => {
+            this.pendingPlanDecisions.set(requestId, {
+                resolve,
+                reject,
+                toolName,
+                planDecision
+            });
+
+            this.addPendingPlanDecisionToState(requestId, toolName, planDecision);
+
+            logger.debug(`${this.getLogPrefix()} Plan decision request sent for ${toolName} (${requestId})`);
+        });
+    }
+
     /**
      * Reset state for new sessions.
      * This method is idempotent - safe to call multiple times.
@@ -251,8 +355,10 @@ export abstract class BasePermissionHandler {
             // Snapshot pending requests to avoid Map mutation during iteration
             const pendingSnapshot = Array.from(this.pendingRequests.entries());
             const pendingQuestionnaireSnapshot = Array.from(this.pendingQuestionnaires.entries());
+            const pendingPlanDecisionSnapshot = Array.from(this.pendingPlanDecisions.entries());
             this.pendingRequests.clear(); // Clear immediately to prevent new entries being processed
             this.pendingQuestionnaires.clear();
+            this.pendingPlanDecisions.clear();
 
             // Reject all pending requests from snapshot
             for (const [id, pending] of pendingSnapshot) {
@@ -268,6 +374,14 @@ export abstract class BasePermissionHandler {
                     pending.reject(new Error('Session reset'));
                 } catch (err) {
                     logger.debug(`${this.getLogPrefix()} Error rejecting pending questionnaire ${id}:`, err);
+                }
+            }
+
+            for (const [id, pending] of pendingPlanDecisionSnapshot) {
+                try {
+                    pending.reject(new Error('Session reset'));
+                } catch (err) {
+                    logger.debug(`${this.getLogPrefix()} Error rejecting pending plan decision ${id}:`, err);
                 }
             }
 

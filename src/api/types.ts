@@ -200,7 +200,7 @@ export const MachineMetadataSchema = z.object({
   claudeCodeVersion: z.string().optional(),
   claudeCodeLatestVersion: z.string().optional(),
   claudeCodeUpdateCommand: z.string().optional(),
-})
+}).passthrough()
 
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>
 

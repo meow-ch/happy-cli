@@ -277,8 +277,8 @@ export class ApiClient {
     return new ApiSessionClient(this.credential.token, session);
   }
 
-  machineSyncClient(machine: Machine): ApiMachineClient {
-    return new ApiMachineClient(this.credential.token, machine);
+  machineSyncClient(machine: Machine, currentMachineMetadata?: MachineMetadata): ApiMachineClient {
+    return new ApiMachineClient(this.credential.token, machine, currentMachineMetadata);
   }
 
   push(): PushNotificationClient {

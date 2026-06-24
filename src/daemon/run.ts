@@ -849,7 +849,7 @@ export async function startDaemon(): Promise<void> {
     logger.debug(`[DAEMON RUN] Machine registered: ${machine.id}`);
 
     // Create realtime machine session
-    const apiMachine = api.machineSyncClient(machine);
+    const apiMachine = api.machineSyncClient(machine, initialMachineMetadata);
 
     // Set RPC handlers
     apiMachine.setRPCHandlers({
@@ -997,7 +997,8 @@ export async function startDaemon(): Promise<void> {
       if (result?.isOutdated) {
         logger.info(`[DAEMON RUN] Claude Code outdated: ${result.installedVersion} -> ${result.latestVersion}`);
         logger.info(`[DAEMON RUN] Update: ${result.updateCommand}`);
-        apiMachine.updateMachineMetadata(() => ({
+        apiMachine.updateMachineMetadata((metadata) => ({
+          ...(metadata ?? {}),
           ...initialMachineMetadata,
           claudeCodeVersion: result.installedVersion,
           claudeCodeLatestVersion: result.latestVersion,

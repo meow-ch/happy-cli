@@ -21,10 +21,20 @@ export type PrepareAgentPlaneSessionResponse = {
 };
 
 // Keep this allowlist in sync with the Agent Plane secure session prep bundle.
-const AGENT_PLANE_SESSION_ALLOWED_FILES = new Set(['AGENTS.md', 'CLAUDE.md', '.mcp.json', 'conversation-history.md']);
-const AGENT_PLANE_SESSION_MAX_FILES = 4;
-const AGENT_PLANE_SESSION_MAX_FILE_BYTES = 2 * 1024 * 1024;
+export const AGENT_PLANE_SESSION_ALLOWED_FILE_NAMES = ['AGENTS.md', 'CLAUDE.md', '.mcp.json', 'conversation-history.md'] as const;
+export const AGENT_PLANE_SESSION_ALLOWED_FILES = new Set<string>(AGENT_PLANE_SESSION_ALLOWED_FILE_NAMES);
+export const AGENT_PLANE_SESSION_MAX_FILES = 4;
+export const AGENT_PLANE_SESSION_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const AGENT_PLANE_CONVERSATION_ID_PATTERN = /^conv_[A-Za-z0-9_-]{8,120}$/;
+
+export function getAgentPlaneSessionPrepCapabilities() {
+    return {
+        supported: true,
+        allowedFiles: [...AGENT_PLANE_SESSION_ALLOWED_FILE_NAMES],
+        maxFiles: AGENT_PLANE_SESSION_MAX_FILES,
+        maxFileBytes: AGENT_PLANE_SESSION_MAX_FILE_BYTES,
+    };
+}
 
 function getAgentPlaneSessionRoot(): string {
     return resolve(tmpdir(), 'conversations');

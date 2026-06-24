@@ -11,8 +11,14 @@ import { registerCommonHandlers, SpawnSessionOptions, SpawnSessionResult } from 
 import { encodeBase64, decodeBase64, encrypt, decrypt } from './encryption';
 import { backoff } from '@/utils/time';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
-import { prepareAgentPlaneSession, PrepareAgentPlaneSessionRequest, PrepareAgentPlaneSessionResponse } from './agentPlaneSessionPrep';
+import {
+    getAgentPlaneSessionPrepCapabilities,
+    prepareAgentPlaneSession,
+    PrepareAgentPlaneSessionRequest,
+    PrepareAgentPlaneSessionResponse
+} from './agentPlaneSessionPrep';
 import type { DaemonSessionStatus } from '@/daemon/sessionRegistry';
+import packageJson from '../../package.json';
 
 interface ServerToDaemonEvents {
     update: (data: Update) => void;
@@ -90,6 +96,73 @@ type MachineRpcHandlers = {
     requestShutdown: () => void;
 }
 
+const DAEMON_MANAGED_MACHINE_METADATA_KEYS = [
+    'host',
+    'platform',
+    'happyCliVersion',
+    'homeDir',
+    'happyHomeDir',
+    'happyLibDir',
+    'claudeCodeVersion',
+    'claudeCodeLatestVersion',
+    'claudeCodeUpdateCommand',
+] as const;
+
+type DaemonManagedMachineMetadataKey = typeof DAEMON_MANAGED_MACHINE_METADATA_KEYS[number];
+
+export function buildDaemonCapabilities() {
+    return {
+        type: 'daemon-capabilities',
+        happyCliVersion: packageJson.version,
+        capabilities: {
+            agentPlaneSessionPrep: getAgentPlaneSessionPrepCapabilities(),
+        },
+    };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function mergeDaemonManagedMachineMetadata(
+    existing: MachineMetadata | null,
+    current: MachineMetadata
+): MachineMetadata {
+    const merged: Record<string, unknown> = {
+        ...(isRecord(existing) ? existing : {}),
+    };
+    for (const key of DAEMON_MANAGED_MACHINE_METADATA_KEYS) {
+        const value = current[key];
+        if (value === undefined) {
+            delete merged[key];
+        } else {
+            merged[key] = value;
+        }
+    }
+    return merged as MachineMetadata;
+}
+
+export function machineMetadataNeedsDaemonRefresh(
+    existing: MachineMetadata | null,
+    current: MachineMetadata
+): boolean {
+    if (!isRecord(existing)) return true;
+    for (const key of DAEMON_MANAGED_MACHINE_METADATA_KEYS) {
+        if ((existing as Record<DaemonManagedMachineMetadataKey, unknown>)[key] !== current[key]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function machineMetadataEqual(left: MachineMetadata | null, right: MachineMetadata): boolean {
+    try {
+        return JSON.stringify(left ?? null) === JSON.stringify(right);
+    } catch {
+        return false;
+    }
+}
+
 export class ApiMachineClient {
     private socket!: Socket<ServerToDaemonEvents, DaemonToServerEvents>;
     private keepAliveInterval: NodeJS.Timeout | null = null;
@@ -97,7 +170,8 @@ export class ApiMachineClient {
 
     constructor(
         private token: string,
-        private machine: Machine
+        private machine: Machine,
+        private currentMachineMetadata?: MachineMetadata
     ) {
         // Initialize RPC handler manager
         this.rpcHandlerManager = new RpcHandlerManager({
@@ -112,6 +186,7 @@ export class ApiMachineClient {
             'prepare-agent-plane-session',
             async (params) => prepareAgentPlaneSession(params)
         );
+        this.rpcHandlerManager.registerHandler('daemon-capabilities', async () => buildDaemonCapabilities());
     }
 
     setRPCHandlers({
@@ -215,6 +290,11 @@ export class ApiMachineClient {
         await backoff(async () => {
             const updated = handler(this.machine.metadata);
 
+            if (machineMetadataEqual(this.machine.metadata, updated)) {
+                logger.debug('[API MACHINE] Metadata unchanged, skipping update');
+                return;
+            }
+
             const answer = await this.socket.emitWithAck('machine-update-metadata', {
                 machineId: this.machine.id,
                 metadata: encodeBase64(encrypt(this.machine.encryptionKey, this.machine.encryptionVariant, updated)),
@@ -233,6 +313,19 @@ export class ApiMachineClient {
                 throw new Error('Metadata version mismatch'); // Triggers retry
             }
         });
+    }
+
+    private async reconcileDaemonManagedMachineMetadata(): Promise<void> {
+        if (!this.currentMachineMetadata) {
+            return;
+        }
+        if (!machineMetadataNeedsDaemonRefresh(this.machine.metadata, this.currentMachineMetadata)) {
+            logger.debug('[API MACHINE] Daemon-managed metadata already current');
+            return;
+        }
+        await this.updateMachineMetadata((metadata) => (
+            mergeDaemonManagedMachineMetadata(metadata, this.currentMachineMetadata!)
+        ));
     }
 
     /**
@@ -292,7 +385,10 @@ export class ApiMachineClient {
                 pid: process.pid,
                 httpPort: this.machine.daemonState?.httpPort,
                 startedAt: Date.now()
-            }));
+            })).catch((error) => logger.debug('[API MACHINE] Failed to update daemon state on connect', error));
+
+            this.reconcileDaemonManagedMachineMetadata()
+                .catch((error) => logger.debug('[API MACHINE] Failed to refresh daemon-managed machine metadata', error));
 
 
             // Register all handlers
@@ -378,3 +474,9 @@ export class ApiMachineClient {
         }
     }
 }
+
+export const __testApiMachineClientInternals = {
+    buildDaemonCapabilities,
+    machineMetadataNeedsDaemonRefresh,
+    mergeDaemonManagedMachineMetadata,
+};

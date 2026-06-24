@@ -3,8 +3,9 @@ import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { ApiMachineClient } from './apiMachine';
+import { ApiMachineClient, __testApiMachineClientInternals } from './apiMachine';
 import { __testAgentPlaneSessionPrep } from './agentPlaneSessionPrep';
+import packageJson from '../../package.json';
 
 describe('Agent Plane session preparation RPC', () => {
     it('accepts the full Agent Plane session prep bundle from conversationId', async () => {
@@ -119,6 +120,65 @@ describe('Agent Plane session preparation RPC', () => {
 });
 
 describe('machine session status RPC', () => {
+    it('reports daemon capabilities from the live daemon package', async () => {
+        const client = new ApiMachineClient('token', {
+            id: 'machine_test',
+            name: 'machine_test',
+            encryptionKey: new Uint8Array(32),
+            encryptionVariant: 'legacy',
+            metadata: null,
+            metadataVersion: 0,
+            daemonState: null,
+            daemonStateVersion: 0,
+        } as any);
+
+        const manager = (client as any).rpcHandlerManager;
+        expect(manager.hasHandler('daemon-capabilities')).toBe(true);
+        const handler = manager.handlers.get('machine_test:daemon-capabilities');
+
+        await expect(handler({})).resolves.toEqual({
+            type: 'daemon-capabilities',
+            happyCliVersion: packageJson.version,
+            capabilities: {
+                agentPlaneSessionPrep: {
+                    supported: true,
+                    allowedFiles: ['AGENTS.md', 'CLAUDE.md', '.mcp.json', 'conversation-history.md'],
+                    maxFiles: 4,
+                    maxFileBytes: 2 * 1024 * 1024,
+                },
+            },
+        });
+    });
+
+    it('refreshes stale daemon-managed metadata while preserving custom metadata', () => {
+        const {
+            machineMetadataNeedsDaemonRefresh,
+            mergeDaemonManagedMachineMetadata,
+        } = __testApiMachineClientInternals;
+        const current = {
+            host: 'new-host',
+            platform: 'darwin',
+            happyCliVersion: packageJson.version,
+            homeDir: '/Users/g',
+            happyHomeDir: '/Users/g/.boujot',
+            happyLibDir: '/opt/boujot',
+            claudeCodeVersion: '1.2.3',
+        };
+        const existing = {
+            ...current,
+            host: 'old-host',
+            happyCliVersion: '0.14.14',
+            customName: 'Desk Mini',
+        };
+
+        expect(machineMetadataNeedsDaemonRefresh(existing, current)).toBe(true);
+        expect(mergeDaemonManagedMachineMetadata(existing, current)).toEqual({
+            ...current,
+            customName: 'Desk Mini',
+        });
+        expect(machineMetadataNeedsDaemonRefresh(current, current)).toBe(false);
+    });
+
     it('forwards Codex MCP spawn options to the daemon spawn handler', async () => {
         const client = new ApiMachineClient('token', {
             id: 'machine_test',

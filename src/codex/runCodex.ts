@@ -25,8 +25,11 @@ import { trimIdent } from "@/utils/trimIdent";
 import type { CodexSessionConfig } from './types';
 import {
     CODEX_EXTERNAL_MCP_SERVERS_ENV,
+    CODEX_USE_BUILTIN_HAPPY_MCP_ENV,
+    type CodexMcpServers,
     mergeCodexMcpServers,
     parseExternalCodexMcpServers,
+    shouldUseBuiltInHappyMcp,
 } from './codexMcpServers';
 import { resolveCodexExecutionPolicy } from './executionPolicy';
 // Codex does not support the Gemini-style `functions.happy__change_title` instruction.
@@ -452,7 +455,7 @@ export async function runCodex(opts: {
             stopCaffeinate();
 
             // Stop Happy MCP server
-            happyServer.stop();
+            happyServer?.stop();
 
             logger.debug('[Codex] Session termination complete, exiting');
             process.exit(0);
@@ -828,33 +831,36 @@ export async function runCodex(opts: {
         }
     });
 
-    // Start Happy MCP server (HTTP) and prepare STDIO bridge config for Codex
-    const happyServer = await startHappyServer(session);
-    const bridgeCommand = join(projectPath(), 'bin', 'boujot-mcp.mjs');
-    const builtInMcpServers = {
-        happy: {
-            // Run via Node directly to avoid shebang/exec-bit issues across environments.
-            command: process.execPath,
-            args: [bridgeCommand, '--url', happyServer.url],
-            // Pre-trust every tool exposed by the happy MCP server (we
-            // registered it ourselves; the model is asking permission to
-            // call something we've already authorized). Without this, codex
-            // 0.128's mcp-server elicits an mcp_tool_call_approval that has
-            // no response path back to the daemon → session deadlocks on
-            // the very first model-driven MCP tool call (e.g. our
-            // auto-prompted change_title). Session-wide approval-policy
-            // (untrusted/on-request/never) doesn't bypass these — only the
-            // per-server default_tools_approval_mode does.
-            // Codex 0.128 accepts `auto`, `prompt`, or `approve` here.
-            // `prompt` (default) elicits → daemon hangs; `auto` routes to
-            // codex's auto-review subagent which ALSO elicits in mcp-server
-            // topology (verified by scripts/probe-codex-elicit.mjs);
-            // `approve` is the only value that bypasses the elicitation
-            // entirely and lets the tool execute. We register every tool
-            // exposed by `happy` ourselves, so blanket-approve is correct.
-            default_tools_approval_mode: 'approve',
-        }
-    } as const;
+    // Start Happy MCP server (HTTP) and prepare STDIO bridge config for Codex.
+    // Externally managed runtimes can opt out and provide their own MCP/tool priming.
+    const useBuiltInHappyMcp = shouldUseBuiltInHappyMcp(process.env[CODEX_USE_BUILTIN_HAPPY_MCP_ENV]);
+    const happyServer = useBuiltInHappyMcp ? await startHappyServer(session) : null;
+    const builtInMcpServers: CodexMcpServers = useBuiltInHappyMcp
+        ? {
+            happy: {
+                // Run via Node directly to avoid shebang/exec-bit issues across environments.
+                command: process.execPath,
+                args: [join(projectPath(), 'bin', 'boujot-mcp.mjs'), '--url', happyServer!.url],
+                // Pre-trust every tool exposed by the happy MCP server (we
+                // registered it ourselves; the model is asking permission to
+                // call something we've already authorized). Without this, codex
+                // 0.128's mcp-server elicits an mcp_tool_call_approval that has
+                // no response path back to the daemon → session deadlocks on
+                // the very first model-driven MCP tool call (e.g. our
+                // auto-prompted change_title). Session-wide approval-policy
+                // (untrusted/on-request/never) doesn't bypass these — only the
+                // per-server default_tools_approval_mode does.
+                // Codex 0.128 accepts `auto`, `prompt`, or `approve` here.
+                // `prompt` (default) elicits → daemon hangs; `auto` routes to
+                // codex's auto-review subagent which ALSO elicits in mcp-server
+                // topology (verified by scripts/probe-codex-elicit.mjs);
+                // `approve` is the only value that bypasses the elicitation
+                // entirely and lets the tool execute. We register every tool
+                // exposed by `happy` ourselves, so blanket-approve is correct.
+                default_tools_approval_mode: 'approve',
+            }
+        } as const
+        : {};
     const externalMcp = parseExternalCodexMcpServers(process.env[CODEX_EXTERNAL_MCP_SERVERS_ENV]);
     if (externalMcp.warning) {
         logger.warn(`[Codex] ${externalMcp.warning}`);
@@ -921,9 +927,11 @@ export async function runCodex(opts: {
                     const startConfig: CodexSessionConfig = {
                         prompt: message.message,
                         'approval-policy': policy.approvalPolicy,
-                        'base-instructions': CODEX_CHANGE_TITLE_INSTRUCTION,
                         config: { mcp_servers: mcpServers }
                     };
+                    if (useBuiltInHappyMcp) {
+                        startConfig['base-instructions'] = CODEX_CHANGE_TITLE_INSTRUCTION;
+                    }
                     if (policy.permissionProfile) {
                         startConfig.permissions = policy.permissionProfile;
                     } else if (policy.sandboxMode) {
@@ -1077,7 +1085,7 @@ export async function runCodex(opts: {
         logger.debug('[codex]: client.forceCloseSession done');
         // Stop Happy MCP server
         logger.debug('[codex]: happyServer.stop');
-        happyServer.stop();
+        happyServer?.stop();
 
         // Clean up ink UI
         if (process.stdin.isTTY) {

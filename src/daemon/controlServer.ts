@@ -114,7 +114,10 @@ export function startDaemonControlServer({
           // RPC handler so local HTTP callers (e.g. agent-plane/core) can pick
           // codex or gemini instead of defaulting to claude. Unspecified =>
           // claude, preserving the previous behavior for existing callers.
-          agent: z.enum(['claude', 'codex', 'gemini']).optional()
+          agent: z.enum(['claude', 'codex', 'gemini']).optional(),
+          environmentVariables: z.record(z.string(), z.string()).optional(),
+          codexMcpServers: z.record(z.string(), z.unknown()).optional(),
+          codexUseBuiltInHappyMcp: z.boolean().optional()
         }),
         response: {
           200: z.object({
@@ -135,10 +138,17 @@ export function startDaemonControlServer({
         }
       }
     }, async (request, reply) => {
-      const { directory, sessionId, agent } = request.body;
+      const { directory, sessionId, agent, environmentVariables, codexMcpServers, codexUseBuiltInHappyMcp } = request.body;
 
       logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent || 'claude'}`);
-      const result = await spawnSession({ directory, sessionId, agent });
+      const result = await spawnSession({
+        directory,
+        sessionId,
+        agent,
+        environmentVariables,
+        codexMcpServers,
+        codexUseBuiltInHappyMcp,
+      });
 
       switch (result.type) {
         case 'success':

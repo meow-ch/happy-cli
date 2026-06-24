@@ -2,6 +2,7 @@ export type CodexMcpServerConfig = Record<string, unknown>;
 export type CodexMcpServers = Record<string, CodexMcpServerConfig>;
 
 export const CODEX_EXTERNAL_MCP_SERVERS_ENV = 'HAPPY_CODEX_MCP_SERVERS_JSON';
+export const CODEX_USE_BUILTIN_HAPPY_MCP_ENV = 'HAPPY_CODEX_USE_BUILTIN_HAPPY_MCP';
 export const RESERVED_CODEX_MCP_SERVER_NAMES = new Set(['happy']);
 
 export function parseExternalCodexMcpServers(
@@ -60,6 +61,11 @@ export function mergeCodexMcpServers(
         ...external,
         ...builtIn,
     };
+}
+
+export function shouldUseBuiltInHappyMcp(raw: string | undefined): boolean {
+    const normalized = raw?.trim().toLowerCase();
+    return normalized !== '0' && normalized !== 'false' && normalized !== 'no';
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

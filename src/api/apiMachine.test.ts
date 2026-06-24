@@ -7,7 +7,7 @@ import { ApiMachineClient } from './apiMachine';
 import { __testAgentPlaneSessionPrep } from './agentPlaneSessionPrep';
 
 describe('Agent Plane session preparation RPC', () => {
-    it('writes session files under the local conversations temp root from conversationId', async () => {
+    it('accepts the full Agent Plane session prep bundle from conversationId', async () => {
         const conversationId = `conv_api_machine_test_${Date.now()}`;
         const directory = join(tmpdir(), 'conversations', conversationId);
         await rm(directory, { recursive: true, force: true });
@@ -15,14 +15,18 @@ describe('Agent Plane session preparation RPC', () => {
         const result = await __testAgentPlaneSessionPrep.prepareAgentPlaneSession({
             conversationId,
             files: [
+                { path: 'AGENTS.md', content: 'codex primer' },
                 { path: 'CLAUDE.md', content: 'primer' },
                 { path: '.mcp.json', content: '{"ok":true}' },
+                { path: 'conversation-history.md', content: '# Conversation History\n\nhello' },
             ],
         });
 
-        expect(result).toEqual({ type: 'success', directory, filesWritten: 2 });
+        expect(result).toEqual({ type: 'success', directory, filesWritten: 4 });
+        await expect(readFile(join(directory, 'AGENTS.md'), 'utf8')).resolves.toBe('codex primer');
         await expect(readFile(join(directory, 'CLAUDE.md'), 'utf8')).resolves.toBe('primer');
         await expect(readFile(join(directory, '.mcp.json'), 'utf8')).resolves.toBe('{"ok":true}');
+        await expect(readFile(join(directory, 'conversation-history.md'), 'utf8')).resolves.toBe('# Conversation History\n\nhello');
 
         await rm(directory, { recursive: true, force: true });
     });
@@ -115,6 +119,62 @@ describe('Agent Plane session preparation RPC', () => {
 });
 
 describe('machine session status RPC', () => {
+    it('forwards Codex MCP spawn options to the daemon spawn handler', async () => {
+        const client = new ApiMachineClient('token', {
+            id: 'machine_test',
+            name: 'machine_test',
+            encryptionKey: new Uint8Array(32),
+            encryptionVariant: 'legacy',
+            metadata: null,
+            metadataVersion: 0,
+            daemonState: null,
+            daemonStateVersion: 0,
+        } as any);
+        const calls: unknown[] = [];
+
+        client.setRPCHandlers({
+            spawnSession: async (options) => {
+                calls.push(options);
+                return { type: 'success', sessionId: 'sid_codex' };
+            },
+            stopSession: () => false,
+            sessionStatusList: () => [],
+            requestShutdown: () => {},
+        });
+
+        const manager = (client as any).rpcHandlerManager;
+        const handler = manager.handlers.get('machine_test:spawn-happy-session');
+        await expect(handler({
+            directory: '/tmp/conversations/conv_x',
+            agent: 'codex',
+            environmentVariables: { EXTERNAL_MCP_TOKEN: 'session-token' },
+            codexMcpServers: {
+                external: {
+                    url: 'http://127.0.0.1:3100/mcp',
+                    bearer_token_env_var: 'EXTERNAL_MCP_TOKEN',
+                },
+            },
+            codexUseBuiltInHappyMcp: false,
+        })).resolves.toEqual({ type: 'success', sessionId: 'sid_codex' });
+
+        expect(calls).toEqual([{
+            directory: '/tmp/conversations/conv_x',
+            sessionId: undefined,
+            machineId: undefined,
+            approvedNewDirectoryCreation: undefined,
+            agent: 'codex',
+            token: undefined,
+            environmentVariables: { EXTERNAL_MCP_TOKEN: 'session-token' },
+            codexMcpServers: {
+                external: {
+                    url: 'http://127.0.0.1:3100/mcp',
+                    bearer_token_env_var: 'EXTERNAL_MCP_TOKEN',
+                },
+            },
+            codexUseBuiltInHappyMcp: false,
+        }]);
+    });
+
     it('registers session-status-list and delegates to daemon session tracking', async () => {
         const client = new ApiMachineClient('token', {
             id: 'machine_test',

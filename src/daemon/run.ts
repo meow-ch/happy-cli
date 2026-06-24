@@ -23,6 +23,10 @@ import { join } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
+import {
+  CODEX_EXTERNAL_MCP_SERVERS_ENV,
+  CODEX_USE_BUILTIN_HAPPY_MCP_ENV,
+} from '@/codex/codexMcpServers';
 import { getGlobalClaudeVersion, checkClaudeVersion } from '@/utils/claudeVersionCheck';
 import {
   DaemonSessionStatus,
@@ -434,6 +438,15 @@ export async function startDaemon(): Promise<void> {
             logger.debug('[DAEMON RUN] Failed to load CLI local profile environment variables:', error);
             // Continue without profile env vars - this is not a fatal error
           }
+        }
+
+        if (options.agent === 'codex' && options.codexMcpServers && Object.keys(options.codexMcpServers).length > 0) {
+          profileEnv[CODEX_EXTERNAL_MCP_SERVERS_ENV] = JSON.stringify(options.codexMcpServers);
+        }
+        if (options.agent === 'codex' && options.codexUseBuiltInHappyMcp === false) {
+          profileEnv[CODEX_USE_BUILTIN_HAPPY_MCP_ENV] = '0';
+        } else if (options.agent === 'codex' && options.codexUseBuiltInHappyMcp === true) {
+          profileEnv[CODEX_USE_BUILTIN_HAPPY_MCP_ENV] = '1';
         }
 
         // Final merge: Profile vars first, then auth (auth takes precedence to protect authentication)

@@ -85,6 +85,7 @@ export async function runCodex(opts: {
 }): Promise<void> {
     // Use shared PermissionMode type for cross-agent compatibility
     type PermissionMode = import('@/api/types').PermissionMode;
+    type PermissionPreset = import('@/api/types').PermissionPreset;
     type CodexApprovalPolicy = import('@/api/types').CodexApprovalPolicy;
     type CodexCollaborationMode = import('@/api/types').CodexCollaborationMode;
     type CodexPermissionProfile = import('@/api/types').CodexPermissionProfile;
@@ -97,6 +98,7 @@ export async function runCodex(opts: {
     }
     interface EnhancedMode {
         permissionMode: PermissionMode;
+        permissionPreset?: PermissionPreset;
         runtimeMode?: RuntimeMode;
         accessMode?: RuntimeAccessMode;
         collaborationMode?: CodexCollaborationMode;
@@ -191,6 +193,7 @@ export async function runCodex(opts: {
 
     const messageQueue = new MessageQueue2<EnhancedMode>((mode) => hashObject({
         permissionMode: mode.permissionMode,
+        permissionPreset: mode.permissionPreset,
         runtimeMode: mode.runtimeMode,
         accessMode: mode.accessMode,
         collaborationMode: mode.collaborationMode,
@@ -204,6 +207,7 @@ export async function runCodex(opts: {
     // Track current overrides to apply per message
     // Use shared PermissionMode type from api/types for cross-agent compatibility
     let currentPermissionMode: import('@/api/types').PermissionMode | undefined = undefined;
+    let currentPermissionPreset: import('@/api/types').PermissionPreset | undefined = undefined;
     let currentRuntimeMode: import('@/api/types').RuntimeMode | undefined = undefined;
     let currentAccessMode: import('@/api/types').RuntimeAccessMode | undefined = undefined;
     let currentCollaborationMode: import('@/api/types').CodexCollaborationMode | undefined = undefined;
@@ -222,6 +226,13 @@ export async function runCodex(opts: {
             logger.debug(`[Codex] Permission mode updated from user message to: ${currentPermissionMode}`);
         } else {
             logger.debug(`[Codex] User message received with no permission mode override, using current: ${currentPermissionMode ?? 'default (effective)'}`);
+        }
+
+        let messagePermissionPreset = currentPermissionPreset;
+        if (message.meta?.hasOwnProperty('permissionPreset')) {
+            messagePermissionPreset = message.meta.permissionPreset || undefined;
+            currentPermissionPreset = messagePermissionPreset;
+            logger.debug(`[Codex] Permission preset updated from user message: ${messagePermissionPreset || 'reset to provider defaults'}`);
         }
 
         let messageRuntimeMode = currentRuntimeMode;
@@ -312,6 +323,7 @@ export async function runCodex(opts: {
 
         const enhancedMode: EnhancedMode = {
             permissionMode: messagePermissionMode || 'default',
+            permissionPreset: messagePermissionPreset,
             runtimeMode: messageRuntimeMode,
             accessMode: messageAccessMode,
             collaborationMode: messageCollaborationMode,
@@ -893,6 +905,7 @@ export async function runCodex(opts: {
             try {
                 const policy = resolveCodexExecutionPolicy({
                     runtimeMode: message.mode.runtimeMode,
+                    permissionPreset: message.mode.permissionPreset,
                     accessMode: message.mode.accessMode,
                     permissionMode: message.mode.permissionMode,
                     collaborationMode: message.mode.collaborationMode,
@@ -902,6 +915,7 @@ export async function runCodex(opts: {
                     model: message.mode.model,
                     reasoningEffort: message.mode.reasoningEffort,
                 });
+                permissionHandler.setPermissionPreset(policy.permissionPreset);
 
                 if (!wasCreated) {
                     const startConfig: CodexSessionConfig = {

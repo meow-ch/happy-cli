@@ -241,6 +241,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Forward messages to the queue
     // Permission modes: prefer provider-native claudePermissionMode; keep permissionMode as a legacy alias.
     let currentPermissionMode: PermissionMode | undefined = options.permissionMode;
+    let currentPermissionPreset: import('@/api/types').PermissionPreset | undefined = undefined;
     let currentRuntimeMode: import('@/api/types').RuntimeMode | undefined = undefined;
     let currentModel = options.model; // Track current model state
     let currentFallbackModel: string | undefined = undefined; // Track current fallback model
@@ -270,6 +271,19 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug(`[loop] Permission mode updated from user message to: ${currentPermissionMode}`);
         } else {
             logger.debug(`[loop] User message received with no permission mode override, using current: ${currentPermissionMode}`);
+        }
+        let messagePermissionPreset = currentPermissionPreset;
+        if (message.meta?.hasOwnProperty('permissionPreset')) {
+            messagePermissionPreset = message.meta.permissionPreset || undefined;
+            currentPermissionPreset = messagePermissionPreset;
+            logger.debug(`[loop] Permission preset updated from user message: ${messagePermissionPreset || 'reset to provider defaults'}`);
+        }
+        if (messagePermissionPreset === 'auto_edits') {
+            messagePermissionMode = 'acceptEdits';
+        } else if (messagePermissionPreset === 'full_access') {
+            messagePermissionMode = 'bypassPermissions';
+        } else if (messagePermissionPreset === 'ask' || messagePermissionPreset === 'read_only') {
+            messagePermissionMode = 'default';
         }
         if (messageRuntimeMode === 'plan') {
             messagePermissionMode = 'plan';
@@ -347,6 +361,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug('[start] Detected /compact command');
             const enhancedMode: EnhancedMode = {
                 permissionMode: messagePermissionMode || 'default',
+                permissionPreset: messagePermissionPreset,
                 model: messageModel,
                 fallbackModel: messageFallbackModel,
                 customSystemPrompt: messageCustomSystemPrompt,
@@ -363,6 +378,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             logger.debug('[start] Detected /clear command');
             const enhancedMode: EnhancedMode = {
                 permissionMode: messagePermissionMode || 'default',
+                permissionPreset: messagePermissionPreset,
                 model: messageModel,
                 fallbackModel: messageFallbackModel,
                 customSystemPrompt: messageCustomSystemPrompt,
@@ -421,6 +437,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // Push with resolved permission mode, model, system prompts, tools, and images
         const enhancedMode: EnhancedMode = {
             permissionMode: messagePermissionMode || 'default',
+            permissionPreset: messagePermissionPreset,
             model: messageModel,
             fallbackModel: messageFallbackModel,
             customSystemPrompt: messageCustomSystemPrompt,

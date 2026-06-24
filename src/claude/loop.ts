@@ -10,7 +10,7 @@ import type { JsRuntime } from "./runClaude"
 // Re-export permission mode type from api/types
 // Single unified type with 7 modes - Codex modes mapped at SDK boundary
 export type { PermissionMode } from "@/api/types"
-import type { PermissionMode } from "@/api/types"
+import type { PermissionMode, PermissionPreset } from "@/api/types"
 
 // Image content for multipart messages
 export interface ImageContent {
@@ -21,6 +21,7 @@ export interface ImageContent {
 
 export interface EnhancedMode {
     permissionMode: PermissionMode;
+    permissionPreset?: PermissionPreset;
     model?: string;
     fallbackModel?: string;
     customSystemPrompt?: string;

@@ -4,12 +4,14 @@ import type {
     CodexPermissionProfile,
     CodexSandboxMode,
     PermissionMode,
+    PermissionPreset,
     RuntimeAccessMode,
     RuntimeMode,
 } from '@/api/types';
 
 export interface CodexControlInput {
     runtimeMode?: RuntimeMode | null;
+    permissionPreset?: PermissionPreset | null;
     accessMode?: RuntimeAccessMode | null;
     permissionMode?: PermissionMode | null;
     collaborationMode?: CodexCollaborationMode | null;
@@ -27,6 +29,7 @@ export interface ResolvedCodexExecutionPolicy {
     sandboxMode?: CodexSandboxMode;
     model?: string;
     reasoningEffort?: string;
+    permissionPreset?: PermissionPreset;
 }
 
 function approvalForLegacyMode(mode: PermissionMode): CodexApprovalPolicy {
@@ -79,12 +82,40 @@ function permissionProfileForAccessMode(mode: RuntimeAccessMode): string {
     }
 }
 
+function accessModeForPreset(preset: PermissionPreset): RuntimeAccessMode {
+    switch (preset) {
+        case 'read_only':
+            return 'read-only';
+        case 'full_access':
+            return 'danger-full-access';
+        case 'ask':
+        case 'auto_edits':
+        default:
+            return 'workspace-write';
+    }
+}
+
+function approvalForPreset(preset: PermissionPreset): CodexApprovalPolicy {
+    switch (preset) {
+        case 'read_only':
+        case 'full_access':
+            return 'never';
+        case 'auto_edits':
+            return 'on-request';
+        case 'ask':
+        default:
+            return 'untrusted';
+    }
+}
+
 export function resolveCodexExecutionPolicy(input: CodexControlInput): ResolvedCodexExecutionPolicy {
     const legacyMode = input.permissionMode ?? 'default';
+    const preset = input.permissionPreset ?? undefined;
     const explicitProfile = typeof input.permissionProfile === 'string' && input.permissionProfile.length > 0
         ? input.permissionProfile
         : undefined;
-    const accessProfile = input.accessMode ? permissionProfileForAccessMode(input.accessMode) : undefined;
+    const resolvedAccessMode = input.accessMode ?? (preset ? accessModeForPreset(preset) : undefined);
+    const accessProfile = resolvedAccessMode ? permissionProfileForAccessMode(resolvedAccessMode) : undefined;
     const explicitSandbox = typeof input.sandboxMode === 'string' && input.sandboxMode.length > 0
         ? input.sandboxMode
         : undefined;
@@ -92,9 +123,10 @@ export function resolveCodexExecutionPolicy(input: CodexControlInput): ResolvedC
     return {
         collaborationMode: input.collaborationMode ?? input.runtimeMode ?? (legacyMode === 'plan' ? 'plan' : undefined),
         permissionProfile: explicitProfile ?? accessProfile ?? (explicitSandbox ? undefined : permissionProfileForLegacyMode(legacyMode)),
-        approvalPolicy: input.approvalPolicy ?? approvalForLegacyMode(legacyMode),
+        approvalPolicy: input.approvalPolicy ?? (preset ? approvalForPreset(preset) : approvalForLegacyMode(legacyMode)),
         sandboxMode: explicitProfile ? undefined : explicitSandbox,
         model: input.model ?? undefined,
         reasoningEffort: input.reasoningEffort ?? undefined,
+        permissionPreset: preset,
     };
 }

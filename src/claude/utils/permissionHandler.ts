@@ -201,6 +201,13 @@ export class PermissionHandler {
             };
         }
 
+        if (mode.permissionPreset === 'read_only' && this.isReadOnlyBlockedTool(toolName)) {
+            return {
+                behavior: 'deny',
+                message: `Read-only permission preset blocks ${toolName}. Ask the operator to switch permissions before mutating files or running commands.`,
+            };
+        }
+
         // Check if tool is explicitly allowed
         if (toolName === 'Bash') {
             const inputObj = input as { command?: string };
@@ -248,6 +255,15 @@ export class PermissionHandler {
             }
         }
         return this.handlePermissionRequest(toolCallId, toolName, input, options.signal);
+    }
+
+    private isReadOnlyBlockedTool(toolName: string): boolean {
+        return toolName === 'Bash'
+            || toolName === 'Edit'
+            || toolName === 'MultiEdit'
+            || toolName === 'Write'
+            || toolName === 'NotebookEdit'
+            || toolName === 'TodoWrite';
     }
 
     /**

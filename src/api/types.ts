@@ -15,6 +15,7 @@ import { UsageSchema } from '@/claude/types'
  */
 export type ClaudePermissionMode = 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'dontAsk'
 export type PermissionMode = ClaudePermissionMode | 'plan' | 'read-only' | 'safe-yolo' | 'yolo'
+export type PermissionPreset = 'ask' | 'auto_edits' | 'full_access' | 'read_only'
 export type RuntimeMode = 'default' | 'plan'
 export type RuntimeAccessMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 export type CodexCollaborationMode = 'default' | 'plan'
@@ -252,6 +253,7 @@ export type SessionMessage = z.infer<typeof SessionMessageSchema>
  */
 export const MessageMetaSchema = z.object({
   sentFrom: z.string().optional(), // Source identifier
+  permissionPreset: z.enum(['ask', 'auto_edits', 'full_access', 'read_only']).nullable().optional(), // Provider-neutral permission preset (null = reset)
   permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan', 'read-only', 'safe-yolo', 'yolo']).optional(), // Legacy cross-provider mode for this message
   mode: z.enum(['default', 'plan']).nullable().optional(), // Runtime collaboration/planning mode (null = reset)
   accessMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).nullable().optional(), // Runtime filesystem/tool access mode (null = reset)

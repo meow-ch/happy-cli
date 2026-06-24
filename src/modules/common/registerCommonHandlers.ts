@@ -151,6 +151,7 @@ interface AgentCapabilityInfo {
     claudePermissionModes?: string[];
     codexCollaborationModes?: string[];
     codexPermissionProfiles?: string[];
+    permissionPresets?: string[];
     permissionModes: string[];
     approvalPolicies?: string[];
     sandboxModes?: string[];
@@ -231,6 +232,7 @@ async function buildClaudeCapabilities(env: Record<string, string> | undefined):
         reasoningEfforts: efforts,
         defaultReasoningEffort: defaultEffort,
         claudePermissionModes: ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk'],
+        permissionPresets: ['ask', 'auto_edits', 'full_access', 'read_only'],
         permissionModes: ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan'],
         supportsPlanMode: true,
         supportsTurnInterrupt: true,
@@ -285,6 +287,7 @@ async function buildCodexCapabilities(env: Record<string, string> | undefined): 
         accessModes: ['read-only', 'workspace-write', 'danger-full-access'],
         codexCollaborationModes: runtimeControls.collaborationModes,
         codexPermissionProfiles: runtimeControls.permissionProfiles,
+        permissionPresets: ['ask', 'auto_edits', 'full_access', 'read_only'],
         permissionModes: ['default', 'plan', 'read-only', 'safe-yolo', 'yolo', 'acceptEdits', 'bypassPermissions'],
         approvalPolicies: ['untrusted', 'on-request', 'on-failure', 'never'],
         sandboxModes: ['read-only', 'workspace-write', 'danger-full-access'],

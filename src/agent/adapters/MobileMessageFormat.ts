@@ -30,13 +30,29 @@ export interface MobileMessageMeta {
   model?: string | null;
 }
 
-/**
- * User message content (from mobile app to CLI)
- */
-export interface MobileUserContent {
+export interface MobileTextContent {
   type: 'text';
   text: string;
 }
+
+export interface MobileImageContent {
+  type: 'image';
+  source: {
+    type: 'base64';
+    media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+    data: string;
+  };
+}
+
+export interface MobileMultipartContent {
+  type: 'multipart';
+  parts: Array<MobileTextContent | MobileImageContent>;
+}
+
+/**
+ * User message content (from mobile app to CLI)
+ */
+export type MobileUserContent = MobileTextContent | MobileMultipartContent;
 
 /**
  * User message format

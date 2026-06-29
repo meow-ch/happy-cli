@@ -116,6 +116,99 @@ export async function runCodex(opts: {
         requestId: string;
         planDecision: AgentPlanDecision;
     };
+    const allowedImageMediaTypes = new Set<CodexImageContent['mediaType']>([
+        'image/jpeg',
+        'image/png',
+        'image/gif',
+        'image/webp',
+    ]);
+
+    function decodeStrictImageBase64(value: unknown): { data: string; bytes: Buffer } {
+        if (typeof value !== 'string') {
+            throw new Error('Image payload data must be a base64 string');
+        }
+        const compact = value.replace(/\s+/g, '');
+        if (!compact) {
+            throw new Error('Image payload data is empty');
+        }
+        const padding = compact.match(/=+$/)?.[0].length ?? 0;
+        if (padding > 2 || compact.slice(0, compact.length - padding).includes('=')) {
+            throw new Error('Image payload base64 has invalid padding');
+        }
+        const unpadded = compact.replace(/=+$/, '');
+        if (!/^[A-Za-z0-9+/]+$/.test(unpadded) || unpadded.length % 4 === 1) {
+            throw new Error('Image payload must use standard base64');
+        }
+        const padded = unpadded.padEnd(Math.ceil(unpadded.length / 4) * 4, '=');
+        const bytes = Buffer.from(padded, 'base64');
+        if (bytes.byteLength === 0) {
+            throw new Error('Image payload decoded to an empty file');
+        }
+        const normalized = bytes.toString('base64');
+        if (normalized.replace(/=+$/, '') !== unpadded) {
+            throw new Error('Image payload base64 could not be decoded exactly');
+        }
+        return { data: normalized, bytes };
+    }
+
+    function detectImageMediaType(bytes: Buffer): CodexImageContent['mediaType'] | null {
+        if (bytes.length >= 8
+            && bytes[0] === 0x89
+            && bytes[1] === 0x50
+            && bytes[2] === 0x4e
+            && bytes[3] === 0x47
+            && bytes[4] === 0x0d
+            && bytes[5] === 0x0a
+            && bytes[6] === 0x1a
+            && bytes[7] === 0x0a) {
+            return 'image/png';
+        }
+        if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+            return 'image/jpeg';
+        }
+        if (bytes.length >= 6) {
+            const gifHeader = bytes.subarray(0, 6).toString('ascii');
+            if (gifHeader === 'GIF87a' || gifHeader === 'GIF89a') {
+                return 'image/gif';
+            }
+        }
+        if (bytes.length >= 12
+            && bytes.subarray(0, 4).toString('ascii') === 'RIFF'
+            && bytes.subarray(8, 12).toString('ascii') === 'WEBP') {
+            return 'image/webp';
+        }
+        return null;
+    }
+
+    function parseCodexImagePart(part: unknown, index: number): CodexImageContent {
+        if (!part || typeof part !== 'object' || Array.isArray(part)) {
+            throw new Error(`Image part ${index + 1} must be an object`);
+        }
+        const source = (part as { source?: unknown }).source;
+        if (!source || typeof source !== 'object' || Array.isArray(source)) {
+            throw new Error(`Image part ${index + 1} source must be an object`);
+        }
+        const sourceRecord = source as Record<string, unknown>;
+        if (sourceRecord.type !== 'base64') {
+            throw new Error(`Image part ${index + 1} source type must be base64`);
+        }
+        const mediaType = sourceRecord.media_type;
+        if (typeof mediaType !== 'string' || !allowedImageMediaTypes.has(mediaType as CodexImageContent['mediaType'])) {
+            throw new Error(`Image part ${index + 1} media type is unsupported`);
+        }
+        const decoded = decodeStrictImageBase64(sourceRecord.data);
+        const detectedMediaType = detectImageMediaType(decoded.bytes);
+        if (!detectedMediaType) {
+            throw new Error(`Image part ${index + 1} is not a supported image file`);
+        }
+        if (detectedMediaType !== mediaType) {
+            throw new Error(`Image part ${index + 1} file type does not match declared media type`);
+        }
+        return {
+            mediaType: mediaType as CodexImageContent['mediaType'],
+            data: decoded.data,
+        };
+    }
 
     //
     // Define session
@@ -306,16 +399,14 @@ export async function runCodex(opts: {
             messageText = message.content.text;
         } else {
             const images: CodexImageContent[] = [];
-            for (const part of message.content.parts) {
+            for (let index = 0; index < message.content.parts.length; index += 1) {
+                const part = message.content.parts[index];
                 if (part.type === 'text') {
                     messageText = messageText ? `${messageText}\n${part.text}` : part.text;
                     continue;
                 }
-                if (part.type === 'image' && part.source.type === 'base64') {
-                    images.push({
-                        mediaType: part.source.media_type,
-                        data: part.source.data,
-                    });
+                if (part.type === 'image') {
+                    images.push(parseCodexImagePart(part, index));
                 }
             }
             if (images.length > 0) {
@@ -568,7 +659,8 @@ export async function runCodex(opts: {
     function writeCodexImage(image: CodexImageContent): string {
         fs.mkdirSync(codexImageTempDir, { recursive: true });
         const filePath = join(codexImageTempDir, `${Date.now()}-${randomUUID()}.${imageExtension(image.mediaType)}`);
-        fs.writeFileSync(filePath, Buffer.from(image.data, 'base64'));
+        const decoded = decodeStrictImageBase64(image.data);
+        fs.writeFileSync(filePath, decoded.bytes);
         return filePath;
     }
 

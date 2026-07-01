@@ -11,6 +11,7 @@ import { AsyncLock } from '@/utils/lock';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers';
 import { calculateCost } from '@/utils/pricing';
+import { resolveUserMessageImageReferences } from './imageReferences';
 
 /**
  * ACP (Agent Communication Protocol) message data types.
@@ -129,7 +130,7 @@ export class ApiSessionClient extends EventEmitter {
         })
 
         // Server events
-        this.socket.on('update', (data: Update) => {
+        this.socket.on('update', async (data: Update) => {
             try {
                 logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', data);
 
@@ -147,7 +148,8 @@ export class ApiSessionClient extends EventEmitter {
                         logger.debug(`[SOCKET] 🖼️ MULTIPART MESSAGE - ${parts.length} parts: ${parts.map((p: any) => p.type).join(', ')}`);
                         const imageParts = parts.filter((p: any) => p.type === 'image');
                         if (imageParts.length > 0) {
-                            logger.debug(`[SOCKET] 🖼️ IMAGE FOUND - ${imageParts.length} images, first base64 length: ${imageParts[0]?.source?.data?.length || 0}`);
+                            const firstSource = imageParts[0]?.source;
+                            logger.debug(`[SOCKET] 🖼️ IMAGE FOUND - ${imageParts.length} images, first source: ${firstSource?.type || 'unknown'}`);
                         }
                     }
                     logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body)
@@ -155,12 +157,13 @@ export class ApiSessionClient extends EventEmitter {
                     // Try to parse as user message first
                     const userResult = UserMessageSchema.safeParse(body);
                     if (userResult.success) {
+                        const resolvedUserMessage = await resolveUserMessageImageReferences(userResult.data);
                         // Server already filtered to only our session
-                        logger.debug(`[SOCKET] ✅ Parsed user message successfully. Content type: ${userResult.data.content?.type}`);
+                        logger.debug(`[SOCKET] ✅ Parsed user message successfully. Content type: ${resolvedUserMessage.content?.type}`);
                         if (this.pendingMessageCallback) {
-                            this.pendingMessageCallback(userResult.data);
+                            this.pendingMessageCallback(resolvedUserMessage);
                         } else {
-                            this.pendingMessages.push(userResult.data);
+                            this.pendingMessages.push(resolvedUserMessage);
                         }
                     } else {
                         // If not a user message, it might be a permission response or other message type

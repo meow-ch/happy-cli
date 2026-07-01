@@ -292,14 +292,29 @@ export const CreateSessionResponseSchema = z.object({
 
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>
 
-// Image content schema for user messages
+const ImageMediaTypeSchema = z.enum(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+// Image content schema for user messages. Large Agent Plane images are sent as
+// references and resolved by ApiSessionClient before adapter-specific handling.
+const Base64ImageSourceSchema = z.object({
+    type: z.literal('base64'),
+    media_type: ImageMediaTypeSchema,
+    data: z.string() // Base64 encoded image data
+})
+
+const UrlImageSourceSchema = z.object({
+    type: z.literal('url'),
+    media_type: ImageMediaTypeSchema,
+    url: z.string(),
+    sha256: z.string().optional(),
+    size_bytes: z.number().int().nonnegative().optional(),
+    filename: z.string().optional(),
+    headers: z.record(z.string()).optional()
+})
+
 const ImageContentSchema = z.object({
   type: z.literal('image'),
-  source: z.object({
-    type: z.literal('base64'),
-    media_type: z.enum(['image/jpeg', 'image/png', 'image/gif', 'image/webp']),
-    data: z.string() // Base64 encoded image data
-  })
+  source: z.union([Base64ImageSourceSchema, UrlImageSourceSchema])
 })
 
 // User message content can be text-only or multipart (text + images)

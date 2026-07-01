@@ -116,6 +116,12 @@ export function buildDaemonCapabilities() {
         happyCliVersion: packageJson.version,
         capabilities: {
             agentPlaneSessionPrep: getAgentPlaneSessionPrepCapabilities(),
+            agentPlaneImageReferences: {
+                supported: true,
+                sourceTypes: ['url'],
+                maxImageBytes: 8 * 1024 * 1024,
+                requiresSha256: true,
+            },
         },
     };
 }

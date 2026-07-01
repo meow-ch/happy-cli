@@ -146,6 +146,12 @@ describe('machine session status RPC', () => {
                     maxFiles: 4,
                     maxFileBytes: 2 * 1024 * 1024,
                 },
+                agentPlaneImageReferences: {
+                    supported: true,
+                    sourceTypes: ['url'],
+                    maxImageBytes: 8 * 1024 * 1024,
+                    requiresSha256: true,
+                },
             },
         });
     });

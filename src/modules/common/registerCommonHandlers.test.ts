@@ -232,6 +232,7 @@ describe('registerCommonHandlers agent-capabilities-list', () => {
                 approvalPolicies: ['untrusted', 'on-request', 'on-failure', 'never'],
                 sandboxModes: ['read-only', 'workspace-write', 'danger-full-access'],
                 supportsPlanMode: true,
+                supportsGoals: true,
                 supportsTurnInterrupt: true,
                 supportsApprovalRequests: true,
             }],

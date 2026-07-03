@@ -152,6 +152,10 @@ describe('machine session status RPC', () => {
                     maxImageBytes: 8 * 1024 * 1024,
                     requiresSha256: true,
                 },
+                agentPlaneGoals: {
+                    supported: true,
+                    toolNames: ['create_goal', 'get_goal', 'update_goal'],
+                },
             },
         });
     });

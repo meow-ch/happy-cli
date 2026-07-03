@@ -156,6 +156,7 @@ interface AgentCapabilityInfo {
     approvalPolicies?: string[];
     sandboxModes?: string[];
     supportsPlanMode: boolean;
+    supportsGoals: boolean;
     supportsTurnInterrupt: boolean;
     supportsApprovalRequests: boolean;
 }
@@ -225,6 +226,7 @@ async function buildClaudeCapabilities(env: Record<string, string> | undefined):
         permissionPresets: ['ask', 'auto_edits', 'full_access', 'read_only'],
         permissionModes: ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan'],
         supportsPlanMode: true,
+        supportsGoals: false,
         supportsTurnInterrupt: true,
         supportsApprovalRequests: true,
     };
@@ -282,6 +284,7 @@ async function buildCodexCapabilities(env: Record<string, string> | undefined): 
         approvalPolicies: ['untrusted', 'on-request', 'on-failure', 'never'],
         sandboxModes: ['read-only', 'workspace-write', 'danger-full-access'],
         supportsPlanMode: runtimeControls.collaborationModes.includes('plan'),
+        supportsGoals: true,
         supportsTurnInterrupt: true,
         supportsApprovalRequests: true,
     };

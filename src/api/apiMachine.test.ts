@@ -155,6 +155,24 @@ describe('machine session status RPC', () => {
                 agentPlaneGoals: {
                     supported: true,
                     toolNames: ['create_goal', 'get_goal', 'update_goal'],
+                    nativeRuntimeGoals: {
+                        supported: true,
+                        transport: 'claude_stream_json',
+                        reason: 'Claude stream-json advertises /goal and passes the real claude-goal-stream-json scenario.',
+                        actions: ['start', 'view', 'pause', 'resume', 'clear'],
+                        transports: {
+                            codex_app_server: {
+                                supported: false,
+                                reason: 'Codex app-server accepts /goal as turn input but does not emit native goal lifecycle events.',
+                                actions: [],
+                            },
+                            claude_stream_json: {
+                                supported: true,
+                                reason: 'Claude stream-json advertises /goal and passes the real claude-goal-stream-json scenario.',
+                                actions: ['start', 'view', 'pause', 'resume', 'clear'],
+                            },
+                        },
+                    },
                 },
             },
         });

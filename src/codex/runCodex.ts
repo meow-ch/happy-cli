@@ -32,6 +32,7 @@ import {
     shouldUseBuiltInHappyMcp,
 } from './codexMcpServers';
 import { resolveCodexExecutionPolicy } from './executionPolicy';
+import { formatGoalCommand, parseSpecialCommand } from '@/parsers/specialCommands';
 // Codex does not support the Gemini-style `functions.happy__change_title` instruction.
 // It can, however, call MCP tools exposed via `mcp_servers` (see `mcpServers` below).
 const CODEX_CHANGE_TITLE_INSTRUCTION = [
@@ -414,6 +415,11 @@ export async function runCodex(opts: {
                 logger.debug(`[Codex] Extracted ${images.length} image(s) from user message`);
             }
         }
+        const formattedGoalCommand = formatGoalCommand(message.meta?.runtimeGoalCommand as { action?: string; objective?: string } | undefined);
+        if (formattedGoalCommand) {
+            messageText = formattedGoalCommand;
+            messageImages = undefined;
+        }
 
         const enhancedMode: EnhancedMode = {
             permissionMode: messagePermissionMode || 'default',
@@ -428,7 +434,11 @@ export async function runCodex(opts: {
             reasoningEffort: messageReasoningEffort,
             images: messageImages,
         };
-        if (messageImages && messageImages.length > 0) {
+        const specialCommand = parseSpecialCommand(messageText);
+        if (specialCommand.type === 'goal') {
+            logger.debug(`[Codex] Detected /goal command: ${specialCommand.goal?.action ?? 'unknown'}`);
+            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || messageText, enhancedMode);
+        } else if (messageImages && messageImages.length > 0) {
             messageQueue.pushIsolate(messageText, enhancedMode);
         } else {
             messageQueue.push(messageText, enhancedMode);

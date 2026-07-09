@@ -268,7 +268,11 @@ export const MessageMetaSchema = z.object({
   appendSystemPrompt: z.string().nullable().optional(), // Append to system prompt for this message (null = reset)
   allowedTools: z.array(z.string()).nullable().optional(), // Allowed tools for this message (null = reset)
   disallowedTools: z.array(z.string()).nullable().optional(), // Disallowed tools for this message (null = reset)
-  reasoningEffort: z.string().nullable().optional() // Reasoning effort for this message (null = reset)
+  reasoningEffort: z.string().nullable().optional(), // Reasoning effort for this message (null = reset)
+  runtimeGoalCommand: z.object({
+    action: z.enum(['start', 'view', 'pause', 'resume', 'clear']),
+    objective: z.string().optional()
+  }).optional() // Provider-native /goal command for this message
 })
 
 export type MessageMeta = z.infer<typeof MessageMetaSchema>

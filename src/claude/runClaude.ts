@@ -12,7 +12,7 @@ import { MessageQueue2 } from '@/utils/MessageQueue2';
 import { hashObject } from '@/utils/deterministicJson';
 import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
 import { extractSDKMetadataAsync } from '@/claude/sdk/metadataExtractor';
-import { parseSpecialCommand } from '@/parsers/specialCommands';
+import { formatGoalCommand, parseSpecialCommand } from '@/parsers/specialCommands';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { configuration } from '@/configuration';
 import { notifyDaemonSessionStarted } from '@/daemon/controlClient';
@@ -352,7 +352,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         }
 
         // Get text from message content (handles both text and multipart)
-        const rawMessageText = getUserMessageText(message.content);
+        const rawMessageText = formatGoalCommand(message.meta?.runtimeGoalCommand as { action?: string; objective?: string } | undefined)
+            ?? getUserMessageText(message.content);
 
         // Check for special commands before processing
         const specialCommand = parseSpecialCommand(rawMessageText);
@@ -388,6 +389,23 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             };
             messageQueue.pushIsolateAndClear(specialCommand.originalMessage || rawMessageText, enhancedMode);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
+            return;
+        }
+
+        if (specialCommand.type === 'goal') {
+            logger.debug(`[start] Detected /goal command: ${specialCommand.goal?.action ?? 'unknown'}`);
+            const enhancedMode: EnhancedMode = {
+                permissionMode: messagePermissionMode || 'default',
+                permissionPreset: messagePermissionPreset,
+                model: messageModel,
+                fallbackModel: messageFallbackModel,
+                customSystemPrompt: messageCustomSystemPrompt,
+                appendSystemPrompt: messageAppendSystemPrompt,
+                allowedTools: messageAllowedTools,
+                disallowedTools: messageDisallowedTools
+            };
+            messageQueue.pushIsolateAndClear(specialCommand.originalMessage || rawMessageText, enhancedMode);
+            logger.debugLargeJson('[start] /goal command pushed to queue:', message);
             return;
         }
 

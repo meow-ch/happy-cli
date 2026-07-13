@@ -157,11 +157,64 @@ function turnLifecycleEventFromCompletion(params: any, recordedFailure?: CodexTu
     return event;
 }
 
+type CodexMcpToolLifecycleEvent =
+    | {
+        type: 'mcp_tool_call_begin';
+        call_id: string;
+        server: string;
+        tool: string;
+        arguments: unknown;
+    }
+    | {
+        type: 'mcp_tool_call_end';
+        call_id: string;
+        server: string;
+        tool: string;
+        status: string;
+        duration_ms?: number;
+        result?: unknown;
+        error?: unknown;
+    };
+
+function mcpToolLifecycleEvent(
+    item: unknown,
+    phase: 'started' | 'completed',
+): CodexMcpToolLifecycleEvent | null {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const raw = item as Record<string, unknown>;
+    if (raw.type !== 'mcpToolCall') return null;
+    if (typeof raw.id !== 'string' || typeof raw.server !== 'string' || typeof raw.tool !== 'string') {
+        return null;
+    }
+
+    if (phase === 'started') {
+        return {
+            type: 'mcp_tool_call_begin',
+            call_id: raw.id,
+            server: raw.server,
+            tool: raw.tool,
+            arguments: raw.arguments,
+        };
+    }
+
+    return {
+        type: 'mcp_tool_call_end',
+        call_id: raw.id,
+        server: raw.server,
+        tool: raw.tool,
+        status: typeof raw.status === 'string' ? raw.status : 'completed',
+        ...(typeof raw.durationMs === 'number' ? { duration_ms: raw.durationMs } : {}),
+        ...(raw.result !== undefined ? { result: raw.result } : {}),
+        ...(raw.error !== undefined ? { error: raw.error } : {}),
+    };
+}
+
 export const __testCodexAppServerClientInternals = {
     normalizePlanSteps,
     normalizeCodexFailure,
     planTextFromParts,
     turnLifecycleEventFromCompletion,
+    mcpToolLifecycleEvent,
 };
 
 function asError(error: unknown): Error {
@@ -710,6 +763,12 @@ export class CodexAppServerClient {
 
     private handleThreadItem(item: any, phase: 'started' | 'completed'): void {
         if (!item || typeof item !== 'object') return;
+
+        const mcpToolEvent = mcpToolLifecycleEvent(item, phase);
+        if (mcpToolEvent) {
+            this.handler?.(mcpToolEvent);
+            return;
+        }
 
         if (item.type === 'agentMessage' && phase === 'completed' && typeof item.text === 'string') {
             this.handler?.({ type: 'agent_message', message: item.text });

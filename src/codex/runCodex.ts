@@ -781,6 +781,15 @@ export async function runCodex(opts: {
                 `Result: ${truncatedOutput}${output.length > 200 ? '...' : ''}`,
                 'result'
             );
+        } else if (msg.type === 'mcp_tool_call_begin') {
+            messageBuffer.addMessage(`Calling ${msg.server}:${msg.tool}`, 'tool');
+        } else if (msg.type === 'mcp_tool_call_end') {
+            messageBuffer.addMessage(
+                msg.status === 'failed'
+                    ? `${msg.server}:${msg.tool} failed`
+                    : `${msg.server}:${msg.tool} completed`,
+                'result'
+            );
         } else if (msg.type === 'task_started') {
             messageBuffer.addMessage('Starting task...', 'status');
         } else if (msg.type === 'task_complete') {
@@ -891,6 +900,34 @@ export async function runCodex(opts: {
                 type: 'tool-call-result',
                 callId: call_id,
                 output: output,
+                id: randomUUID()
+            });
+        }
+        if (msg.type === 'mcp_tool_call_begin') {
+            session.sendCodexMessage({
+                type: 'tool-call',
+                name: `${msg.server}:${msg.tool}`,
+                callId: msg.call_id,
+                input: {
+                    server: msg.server,
+                    tool: msg.tool,
+                    arguments: msg.arguments,
+                },
+                id: randomUUID()
+            });
+        }
+        if (msg.type === 'mcp_tool_call_end') {
+            session.sendCodexMessage({
+                type: 'tool-call-result',
+                callId: msg.call_id,
+                output: {
+                    server: msg.server,
+                    tool: msg.tool,
+                    status: msg.status,
+                    duration_ms: msg.duration_ms,
+                    result: msg.result,
+                    error: msg.error,
+                },
                 id: randomUUID()
             });
         }

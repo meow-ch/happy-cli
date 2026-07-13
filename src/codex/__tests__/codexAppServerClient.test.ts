@@ -60,6 +60,48 @@ describe('Codex app-server turn lifecycle normalization', () => {
     });
 });
 
+describe('Codex app-server MCP tool lifecycle normalization', () => {
+    const item = {
+        type: 'mcpToolCall',
+        id: 'call_123',
+        server: 'agent-plane',
+        tool: 'billing_create_recurring_document',
+        arguments: { period: '2026-07' },
+        status: 'completed',
+        durationMs: 41_250,
+        result: { structuredContent: { artifact_id: 'art_123' } },
+    };
+
+    it('maps native MCP starts to tool activity', () => {
+        expect(__testCodexAppServerClientInternals.mcpToolLifecycleEvent(item, 'started')).toEqual({
+            type: 'mcp_tool_call_begin',
+            call_id: 'call_123',
+            server: 'agent-plane',
+            tool: 'billing_create_recurring_document',
+            arguments: { period: '2026-07' },
+        });
+    });
+
+    it('maps native MCP completions with their result', () => {
+        expect(__testCodexAppServerClientInternals.mcpToolLifecycleEvent(item, 'completed')).toEqual({
+            type: 'mcp_tool_call_end',
+            call_id: 'call_123',
+            server: 'agent-plane',
+            tool: 'billing_create_recurring_document',
+            status: 'completed',
+            duration_ms: 41_250,
+            result: { structuredContent: { artifact_id: 'art_123' } },
+        });
+    });
+
+    it('rejects malformed MCP items instead of emitting ambiguous activity', () => {
+        expect(__testCodexAppServerClientInternals.mcpToolLifecycleEvent({
+            type: 'mcpToolCall',
+            id: 'call_without_tool',
+        }, 'started')).toBeNull();
+    });
+});
+
 describe('Codex app-server error normalization', () => {
     it('extracts nested provider details without coercing objects to strings', () => {
         expect(__testCodexAppServerClientInternals.normalizeCodexFailure({

@@ -1,7 +1,12 @@
 import { render } from "ink";
 import React from "react";
 import { ApiClient } from '@/api/api';
-import { CodexAppServerClient, type CodexAppServerInput } from './codexAppServerClient';
+import {
+    CodexAppServerClient,
+    normalizeCodexFailure,
+    type CodexAppServerInput,
+    type CodexTurnFailure,
+} from './codexAppServerClient';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { ReasoningProcessor } from './utils/reasoningProcessor';
 import { DiffProcessor } from './utils/diffProcessor';
@@ -740,6 +745,23 @@ export async function runCodex(opts: {
     const sendCompletionEvent = (event: { type: 'task_complete' | 'turn_aborted'; id: string }) => {
         session.sendAgentMessage('codex', event);
     };
+    const finishFailedTurn = (failure: CodexTurnFailure & { id?: string }) => {
+        if (thinking) {
+            thinking = false;
+            session.keepAlive(thinking, 'remote');
+        }
+        diffProcessor.reset();
+        completedPlanForDecision.current = null;
+        deferredCompletionEvent = null;
+        session.sendAgentMessage('codex', {
+            type: 'task_failed',
+            id: failure.id ?? randomUUID(),
+            message: failure.message,
+            ...(failure.code ? { code: failure.code } : {}),
+            ...(failure.param ? { param: failure.param } : {}),
+            ...(failure.status !== undefined ? { status: failure.status } : {}),
+        });
+    };
     client.setHandler((msg) => {
         logger.debug(`[Codex] MCP message: ${JSON.stringify(msg)}`);
 
@@ -766,6 +788,9 @@ export async function runCodex(opts: {
             sendReady();
         } else if (msg.type === 'turn_aborted') {
             messageBuffer.addMessage('Turn aborted', 'status');
+            sendReady();
+        } else if (msg.type === 'task_failed') {
+            messageBuffer.addMessage(`Task failed: ${msg.message}`, 'status');
             sendReady();
         } else if (msg.type === 'plan_update') {
             messageBuffer.addMessage('Plan updated', 'status');
@@ -799,6 +824,12 @@ export async function runCodex(opts: {
                 return;
             }
             sendCompletionEvent(completionEvent);
+        }
+        if (msg.type === 'task_failed') {
+            finishFailedTurn({
+                id: typeof msg.turn_id === 'string' ? msg.turn_id : undefined,
+                ...normalizeCodexFailure(msg),
+            });
         }
         if (msg.type === 'agent_reasoning_section_break') {
             // Reset reasoning processor for new section
@@ -922,14 +953,10 @@ export async function runCodex(opts: {
             }
         }
         if (msg.type === 'error' || msg.type === 'stream_error') {
-            const errorMessage = msg.message || msg.error || msg.text || JSON.stringify(msg);
-            logger.warn(`[Codex] Error from Codex: ${errorMessage}`);
-            messageBuffer.addMessage(`Error: ${errorMessage}`, 'system');
-            session.sendCodexMessage({
-                type: 'message',
-                message: `Error: ${errorMessage}`,
-                id: randomUUID()
-            });
+            const failure = normalizeCodexFailure(msg);
+            logger.warn(`[Codex] Error from Codex: ${failure.message}`);
+            messageBuffer.addMessage(`Error: ${failure.message}`, 'system');
+            finishFailedTurn(failure);
         }
     });
 
@@ -1127,15 +1154,9 @@ export async function runCodex(opts: {
                     // Do not clear session state here; the next user message should continue on the
                     // existing session if possible.
                 } else {
-                    const errorDetail = error instanceof Error ? error.message : String(error);
-                    const userMessage = `Codex error: ${errorDetail}`;
-                    messageBuffer.addMessage(userMessage, 'status');
-                    session.sendCodexMessage({
-                        type: 'message',
-                        message: userMessage,
-                        id: randomUUID()
-                    });
-                    session.sendSessionEvent({ type: 'message', message: userMessage });
+                    const failure = normalizeCodexFailure(error, 'Codex session failed');
+                    messageBuffer.addMessage(`Codex error: ${failure.message}`, 'status');
+                    finishFailedTurn(failure);
                     // For unexpected exits, try to store session for potential recovery
                     if (client.hasActiveSession()) {
                         storedSessionIdForResume = client.storeSessionForResume();

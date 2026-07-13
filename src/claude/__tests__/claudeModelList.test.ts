@@ -1,9 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const queryMock = vi.hoisted(() => vi.fn());
+const mocks = vi.hoisted(() => ({
+    query: vi.fn(),
+    execFile: vi.fn(),
+}));
 
 vi.mock('@/claude/sdk/query', () => ({
-    query: queryMock,
+    query: mocks.query,
+}));
+
+vi.mock('node:child_process', () => ({
+    execFile: mocks.execFile,
 }));
 
 vi.mock('@/ui/logger', () => ({
@@ -15,7 +22,7 @@ vi.mock('@/ui/logger', () => ({
     },
 }));
 
-import { claudeModelList } from '../claudeModelList';
+import { __testClaudeModelListInternals, claudeModelList } from '../claudeModelList';
 
 const envKeys = [
     'ANTHROPIC_API_KEY',
@@ -38,7 +45,7 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 function mockProbeResponses(responses: Record<string, string | null>) {
-    queryMock.mockImplementation(({ options }: { options: { model: string } }) => {
+    mocks.query.mockImplementation(({ options }: { options: { model: string } }) => {
         const resolved = responses[options.model];
         return (async function* () {
             if (resolved === null) {
@@ -55,7 +62,16 @@ function mockProbeResponses(responses: Record<string, string | null>) {
 
 describe('claudeModelList', () => {
     beforeEach(() => {
-        queryMock.mockReset();
+        mocks.query.mockReset();
+        mocks.execFile.mockReset();
+        mocks.execFile.mockImplementation((_command, _args, _options, callback) => {
+            callback(null, [
+                'Usage: claude [options]',
+                '  --effort <level>  Effort level for the current session',
+                '                    (low, medium, high, xhigh, max, ultra)',
+                '  --help            Display help',
+            ].join('\n'), '');
+        });
         for (const key of envKeys) {
             originalEnv.set(key, process.env[key]);
             delete process.env[key];
@@ -84,7 +100,7 @@ describe('claudeModelList', () => {
 
         const models = await claudeModelList();
 
-        expect(queryMock).toHaveBeenCalledTimes(3);
+        expect(mocks.query).toHaveBeenCalledTimes(3);
         expect(models.map(m => m.model)).toEqual(['default', 'sonnet', 'haiku']);
 
         const def = models.find(m => m.model === 'default');
@@ -96,9 +112,8 @@ describe('claudeModelList', () => {
         const sonnet = models.find(m => m.model === 'sonnet');
         expect(sonnet?.description).toBe('Sonnet 4.6 · Best for everyday tasks');
 
-        // Effort selector matches `claude --effort` choices, default = xhigh.
-        expect(def?.efforts?.map(e => e.id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
-        expect(def?.efforts?.find(e => e.isDefault)?.id).toBe('xhigh');
+        expect(def?.efforts?.map(e => e.id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+        expect(def?.efforts?.find(e => e.isDefault)).toBeUndefined();
     });
 
     it('discovers Claude models from a configured gateway when probes fail', async () => {
@@ -158,6 +173,35 @@ describe('claudeModelList', () => {
 
         expect(fetchMock).not.toHaveBeenCalled();
         expect(models.map(m => m.model)).toEqual(['default', 'sonnet', 'haiku']);
-        expect(models[0].efforts?.length).toBe(5);
+        expect(models[0].efforts?.length).toBe(6);
+    });
+
+    it('returns no guessed effort values when native help discovery fails', async () => {
+        mockProbeResponses({
+            default: 'claude-opus-4-7',
+            sonnet: 'claude-sonnet-4-6',
+            haiku: 'claude-haiku-4-5',
+        });
+        mocks.execFile.mockImplementation((_command, _args, _options, callback) => {
+            callback(new Error('claude unavailable'), '', '');
+        });
+
+        const models = await claudeModelList();
+
+        expect(models.every((model) => model.efforts?.length === 0)).toBe(true);
+    });
+});
+
+describe('Claude effort help parser', () => {
+    it('extracts future values without a source-code allowlist', () => {
+        expect(__testClaudeModelListInternals.parseClaudeEffortsFromHelp([
+            '  --effort <level>  Effort level',
+            '                    (tiny, regular, enormous)',
+            '  --help            Display help',
+        ].join('\n'))).toEqual([
+            { id: 'tiny', label: 'Tiny' },
+            { id: 'regular', label: 'Regular' },
+            { id: 'enormous', label: 'Enormous' },
+        ]);
     });
 });

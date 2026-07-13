@@ -39,8 +39,6 @@ function asErrorMessage(error: unknown): string {
     return String(error ?? 'Unknown error');
 }
 
-const CODEX_MODELS_CACHE_PATH = join(homedir(), '.codex', 'models_cache.json');
-
 interface CodexCachedReasoningLevel {
     effort?: string;
     description?: string;
@@ -81,10 +79,15 @@ function mapCachedModel(raw: CodexCachedModel): CodexModelInfo | null {
     };
 }
 
-async function readCodexModelsCache(): Promise<CodexModelInfo[] | null> {
+function codexModelsCachePath(env?: Record<string, string>): string {
+    const codexHome = env?.CODEX_HOME || process.env.CODEX_HOME || join(homedir(), '.codex');
+    return join(codexHome, 'models_cache.json');
+}
+
+async function readCodexModelsCache(env?: Record<string, string>): Promise<CodexModelInfo[] | null> {
     let raw: string;
     try {
-        raw = await fs.readFile(CODEX_MODELS_CACHE_PATH, 'utf8');
+        raw = await fs.readFile(codexModelsCachePath(env), 'utf8');
     } catch {
         return null;
     }
@@ -128,25 +131,75 @@ async function rpcCall(
     });
 }
 
+function mergeCodexModelCatalogs(
+    appServerModels: CodexModelInfo[],
+    cachedModels: CodexModelInfo[] | null,
+): CodexModelInfo[] {
+    const cachedById = new Map((cachedModels ?? []).map((model) => [model.model, model]));
+    const merged: CodexModelInfo[] = appServerModels.map((model) => {
+        const cached = cachedById.get(model.model);
+        const result: CodexModelInfo = {
+            ...cached,
+            ...model,
+        };
+        if (Object.prototype.hasOwnProperty.call(model, 'supportedReasoningEfforts')) {
+            result.supportedReasoningEfforts = model.supportedReasoningEfforts;
+        } else if (cached?.supportedReasoningEfforts !== undefined) {
+            result.supportedReasoningEfforts = cached.supportedReasoningEfforts;
+        } else {
+            delete result.supportedReasoningEfforts;
+        }
+        if (Object.prototype.hasOwnProperty.call(model, 'defaultReasoningEffort')) {
+            result.defaultReasoningEffort = model.defaultReasoningEffort;
+        } else if (cached?.defaultReasoningEffort !== undefined) {
+            result.defaultReasoningEffort = cached.defaultReasoningEffort;
+        } else {
+            delete result.defaultReasoningEffort;
+        }
+        return result;
+    });
+
+    const appServerIds = new Set(appServerModels.map((model) => model.model));
+    for (const cached of cachedModels ?? []) {
+        if (!appServerIds.has(cached.model)) merged.push({ ...cached });
+    }
+
+    const appServerDefault = appServerModels.find((model) => model.isDefault)?.model;
+    const cachedDefault = cachedModels?.find((model) => model.isDefault)?.model;
+    const defaultModel = appServerDefault ?? cachedDefault;
+    for (const model of merged) {
+        if (model.model === defaultModel) model.isDefault = true;
+        else delete model.isDefault;
+    }
+    return merged;
+}
+
 /**
  * List models from the local `codex` CLI.
  *
- * Primary source: `~/.codex/models_cache.json` — this is the same file the
- * interactive `codex /model` selector reads, so the picker matches `/model`
- * exactly (including new entries like gpt-5.5 that don't have a structured
- * config in app-server's `model/list` RPC yet).
- *
- * Fallback: spawn `codex app-server --listen stdio://` and call `model/list`
- * for hosts where the cache file is missing (fresh codex install, custom
- * codex_home dir, or future versions that move the cache).
+ * `model/list` is authoritative for fields and per-model reasoning efforts.
+ * The interactive selector's models cache supplements entries that a running
+ * app-server has not exposed yet. If app-server discovery fails entirely, the
+ * cache remains a graceful offline fallback.
  */
 export async function codexModelList(opts?: { timeoutMs?: number; env?: Record<string, string> }): Promise<CodexModelInfo[]> {
-    const cached = await readCodexModelsCache();
-    if (cached && cached.length > 0) return cached;
-    return await codexModelListViaAppServer(opts);
+    const cachedPromise = readCodexModelsCache(opts?.env);
+    try {
+        const appServerModels = await codexModelListViaAppServer(opts);
+        const cachedModels = await cachedPromise;
+        if (appServerModels.length > 0) {
+            return mergeCodexModelCatalogs(appServerModels, cachedModels);
+        }
+        if (cachedModels?.length) return cachedModels;
+        return [];
+    } catch (error) {
+        const cachedModels = await cachedPromise;
+        if (cachedModels?.length) return cachedModels;
+        throw error;
+    }
 }
 
-async function codexModelListViaAppServer(opts?: { timeoutMs?: number; env?: Record<string, string> }): Promise<CodexModelInfo[]> {
+export async function codexModelListViaAppServer(opts?: { timeoutMs?: number; env?: Record<string, string> }): Promise<CodexModelInfo[]> {
     const timeoutMs = opts?.timeoutMs ?? 8_000;
 
     // Codex app-server speaks newline-delimited JSON-RPC over stdio.

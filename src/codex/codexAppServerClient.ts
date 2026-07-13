@@ -41,6 +41,13 @@ type PendingTurn = {
     timer: NodeJS.Timeout;
 };
 
+export type CodexTurnFailure = {
+    message: string;
+    code?: string;
+    param?: string;
+    status?: number;
+};
+
 function sandboxPolicyFromMode(mode: CodexSessionConfig['sandbox']): Record<string, unknown> | null {
     switch (mode) {
         case 'read-only':
@@ -91,17 +98,68 @@ function planTextFromParts(explanation: unknown, steps: Array<{ step: string; st
     return chunks.join('\n\n');
 }
 
-function turnLifecycleEventFromCompletion(params: any): { type: 'task_complete' | 'turn_aborted'; turn_id?: string } {
+export function normalizeCodexFailure(value: unknown, fallback = 'Codex turn failed'): CodexTurnFailure {
+    let code: string | undefined;
+    let param: string | undefined;
+    let status: number | undefined;
+    const seen = new Set<unknown>();
+
+    const visit = (candidate: unknown, depth: number): string | null => {
+        if (depth > 8 || candidate === null || candidate === undefined) return null;
+        if (typeof candidate === 'string') {
+            const text = candidate.trim();
+            if (!text || text === '[object Object]') return null;
+            if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) {
+                try {
+                    return visit(JSON.parse(text), depth + 1) ?? text;
+                } catch {
+                    return text;
+                }
+            }
+            return text;
+        }
+        if (candidate instanceof Error) return candidate.message || fallback;
+        if (typeof candidate !== 'object' || seen.has(candidate)) return null;
+        seen.add(candidate);
+
+        const record = candidate as Record<string, unknown>;
+        if (!code && typeof record.code === 'string' && record.code) code = record.code;
+        if (!param && typeof record.param === 'string' && record.param) param = record.param;
+        const rawStatus = record.status ?? record.httpStatusCode ?? record.http_status_code;
+        if (status === undefined && typeof rawStatus === 'number' && Number.isFinite(rawStatus)) status = rawStatus;
+
+        for (const key of ['error', 'message', 'details', 'additionalDetails', 'additional_details', 'data', 'codexErrorInfo']) {
+            const message = visit(record[key], depth + 1);
+            if (message) return message;
+        }
+        return null;
+    };
+
+    return {
+        message: visit(value, 0) ?? fallback,
+        ...(code ? { code } : {}),
+        ...(param ? { param } : {}),
+        ...(status !== undefined ? { status } : {}),
+    };
+}
+
+type CodexTurnLifecycleEvent =
+    | { type: 'task_complete'; turn_id?: string }
+    | { type: 'turn_aborted'; turn_id?: string }
+    | ({ type: 'task_failed'; turn_id?: string } & CodexTurnFailure);
+
+function turnLifecycleEventFromCompletion(params: any, recordedFailure?: CodexTurnFailure): CodexTurnLifecycleEvent {
     const turn = params?.turn;
-    const event = {
-        type: turn?.status === 'interrupted' ? 'turn_aborted' : 'task_complete',
-    } as { type: 'task_complete' | 'turn_aborted'; turn_id?: string };
+    const event: CodexTurnLifecycleEvent = turn?.status === 'failed'
+        ? { type: 'task_failed', ...(recordedFailure ?? normalizeCodexFailure(turn?.error)) }
+        : { type: turn?.status === 'interrupted' ? 'turn_aborted' : 'task_complete' };
     if (typeof turn?.id === 'string') event.turn_id = turn.id;
     return event;
 }
 
 export const __testCodexAppServerClientInternals = {
     normalizePlanSteps,
+    normalizeCodexFailure,
     planTextFromParts,
     turnLifecycleEventFromCompletion,
 };
@@ -138,6 +196,7 @@ export class CodexAppServerClient {
     private pending = new Map<JsonRpcId, { resolve: (value: any) => void; reject: (error: Error) => void }>();
     private pendingTurns = new Map<string, PendingTurn>();
     private completedTurns = new Map<string, CodexToolResponse>();
+    private turnFailures = new Map<string, CodexTurnFailure>();
     private threadId: string | null = null;
     private handler: ((event: any) => void) | null = null;
     private permissionHandler: CodexPermissionHandler | null = null;
@@ -637,10 +696,13 @@ export class CodexAppServerClient {
                 return;
             }
             case 'error': {
-                this.handler?.({
-                    type: 'error',
-                    message: params?.message || params?.error || JSON.stringify(params),
-                });
+                const failure = normalizeCodexFailure(params);
+                if (typeof params?.turnId === 'string' && params.turnId) {
+                    this.turnFailures.set(params.turnId, failure);
+                    logger.warn(`[CodexAppServer] Turn ${params.turnId} error: ${failure.message}`);
+                    return;
+                }
+                this.handler?.({ type: 'stream_error', ...failure });
                 return;
             }
         }
@@ -723,14 +785,12 @@ export class CodexAppServerClient {
         const turn = params?.turn;
         const turnId = turn?.id;
         const status = turn?.status;
-        const errorMessage = turn?.error?.message || turn?.error?.details || turn?.error?.additionalDetails;
-
-        if (status === 'failed') {
-            this.handler?.({
-                type: 'error',
-                message: errorMessage || 'Codex turn failed',
-            });
-        }
+        const recordedFailure = typeof turnId === 'string' ? this.turnFailures.get(turnId) : undefined;
+        const failure = status === 'failed'
+            ? recordedFailure ?? normalizeCodexFailure(turn?.error)
+            : undefined;
+        if (typeof turnId === 'string') this.turnFailures.delete(turnId);
+        const lifecycleEvent = turnLifecycleEventFromCompletion(params, failure);
 
         const response: CodexToolResponse = {
             content: [],
@@ -738,19 +798,19 @@ export class CodexAppServerClient {
         };
 
         if (typeof turnId !== 'string') {
-            this.handler?.(turnLifecycleEventFromCompletion(params));
+            this.handler?.(lifecycleEvent);
             return;
         }
 
         const pending = this.pendingTurns.get(turnId);
         if (!pending) {
             this.completedTurns.set(turnId, response);
-            this.handler?.(turnLifecycleEventFromCompletion(params));
+            this.handler?.(lifecycleEvent);
             return;
         }
 
         this.pendingTurns.delete(turnId);
-        this.handler?.(turnLifecycleEventFromCompletion(params));
+        this.handler?.(lifecycleEvent);
         pending.resolve(response);
     }
 

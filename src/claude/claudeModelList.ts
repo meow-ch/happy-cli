@@ -1,6 +1,7 @@
 import { query } from '@/claude/sdk/query';
 import type { SDKSystemMessage } from '@/claude/sdk/types';
 import { logger } from '@/ui/logger';
+import { execFile } from 'node:child_process';
 
 export interface ClaudeEffortOption {
     id: string;
@@ -36,16 +37,61 @@ const PROBE_ALIASES: ReadonlyArray<{ alias: string; description: string }> = [
     { alias: 'haiku', description: 'Fastest for quick answers' },
 ];
 
-// Effort levels accepted by `claude --effort` (see `claude --help`). xhigh is
-// the current default — confirmed against `/model`'s "xHigh effort (default)"
-// indicator. Listed in user-facing order (low → max).
-const CLAUDE_EFFORTS: ReadonlyArray<ClaudeEffortOption> = [
-    { id: 'low', label: 'Low', description: 'Faster, lighter reasoning' },
-    { id: 'medium', label: 'Medium', description: 'Balanced reasoning depth' },
-    { id: 'high', label: 'High', description: 'Greater reasoning depth' },
-    { id: 'xhigh', label: 'xHigh', description: 'Extra-high reasoning depth', isDefault: true },
-    { id: 'max', label: 'Max', description: 'Maximum reasoning depth' },
-];
+function parseClaudeEffortsFromHelp(helpText: string): ClaudeEffortOption[] {
+    const lines = helpText.split(/\r?\n/);
+    const start = lines.findIndex((line) => line.includes('--effort <'));
+    if (start < 0) return [];
+
+    const block: string[] = [];
+    for (let index = start; index < lines.length; index += 1) {
+        const line = lines[index];
+        if (index > start && /^\s{0,4}--[a-z]/i.test(line)) break;
+        block.push(line);
+        if (line.includes(')')) break;
+    }
+
+    const choices = block.join(' ').match(/\(([^)]+)\)/)?.[1];
+    if (!choices) return [];
+    const ids = [...new Set(choices
+        .split(',')
+        .map((value) => value.trim().replace(/^['"]|['"]$/g, ''))
+        .filter((value) => /^[a-z0-9][a-z0-9._-]*$/i.test(value)))];
+    return ids.map((id) => ({
+        id,
+        label: id.charAt(0).toUpperCase() + id.slice(1),
+    }));
+}
+
+async function discoverClaudeEfforts(
+    env: Record<string, string | undefined>,
+    timeoutMs: number,
+): Promise<ClaudeEffortOption[]> {
+    return await new Promise((resolve) => {
+        execFile('claude', ['--help'], {
+            env,
+            timeout: timeoutMs,
+            maxBuffer: 1024 * 1024,
+        }, (error, stdout) => {
+            if (error) {
+                logger.debug('[claudeModelList] effort discovery failed:', error);
+                resolve([]);
+                return;
+            }
+            resolve(parseClaudeEffortsFromHelp(String(stdout)));
+        });
+    });
+}
+
+function attachClaudeEfforts(models: ClaudeModelInfo[], efforts: ClaudeEffortOption[]): ClaudeModelInfo[] {
+    return models.map((model) => ({
+        ...model,
+        efforts: efforts.map((effort) => ({ ...effort })),
+    }));
+}
+
+export const __testClaudeModelListInternals = {
+    parseClaudeEffortsFromHelp,
+};
 
 function envValue(env: Record<string, string | undefined>, key: string): string | undefined {
     const value = env[key]?.trim();
@@ -137,7 +183,6 @@ async function buildFromCliProbes(timeoutMs: number): Promise<ClaudeModelInfo[] 
             description: `${versionLabel} · ${description}`,
             isDefault: alias === 'default' || (index === 0 && !successful.some((p) => p.alias === 'default')),
             source: 'cli',
-            efforts: CLAUDE_EFFORTS.map((e) => ({ ...e })),
         };
     });
 
@@ -159,7 +204,6 @@ function buildStaticFallback(): ClaudeModelInfo[] {
         description,
         isDefault: alias === 'default',
         source: 'builtin',
-        efforts: CLAUDE_EFFORTS.map((e) => ({ ...e })),
     }));
 }
 
@@ -315,9 +359,12 @@ async function fetchGatewayModels(
 export async function claudeModelList(opts?: ClaudeModelListOptions): Promise<ClaudeModelInfo[]> {
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const env: Record<string, string | undefined> = { ...process.env, ...opts?.env };
+    const effortsPromise = discoverClaudeEfforts(env, Math.min(timeoutMs, PROBE_TIMEOUT_MS));
 
     const probed = await buildFromCliProbes(Math.min(timeoutMs, PROBE_TIMEOUT_MS));
-    if (probed && probed.length > 0) return probed;
+    if (probed && probed.length > 0) {
+        return attachClaudeEfforts(probed, await effortsPromise);
+    }
 
     const baseUrl = envValue(env, 'ANTHROPIC_BASE_URL');
     const explicitApiKey = !!envValue(env, 'ANTHROPIC_API_KEY');
@@ -327,12 +374,15 @@ export async function claudeModelList(opts?: ClaudeModelListOptions): Promise<Cl
         try {
             const gatewayModels = await fetchGatewayModels(discoveryBaseUrl, env, timeoutMs);
             if (gatewayModels.length > 0) {
-                return gatewayModels.sort((a, b) => a.model.localeCompare(b.model));
+                return attachClaudeEfforts(
+                    gatewayModels.sort((a, b) => a.model.localeCompare(b.model)),
+                    await effortsPromise,
+                );
             }
         } catch (error) {
             logger.debug('[claudeModelList] gateway discovery failed:', error);
         }
     }
 
-    return buildStaticFallback();
+    return attachClaudeEfforts(buildStaticFallback(), await effortsPromise);
 }

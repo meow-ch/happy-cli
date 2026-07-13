@@ -41,6 +41,7 @@ export type ACPMessageData =
     // Task lifecycle events
     | { type: 'task_started'; id: string }
     | { type: 'task_complete'; id: string }
+    | { type: 'task_failed'; id: string; message: string; code?: string; param?: string; status?: number }
     | { type: 'turn_aborted'; id: string }
     // Permissions
     | { type: 'permission-request'; permissionId: string; toolName: string; description: string; options?: unknown }

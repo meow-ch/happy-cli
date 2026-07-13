@@ -84,14 +84,12 @@ describe('codexModelList', () => {
             mockState.processes.push(proc);
             return proc;
         });
-        // Default to "cache file missing" so the existing app-server fallback
-        // tests still exercise the spawn path. The cache-hit case has its own
-        // dedicated test below.
+        // Default to a missing cache so app-server-only tests stay focused.
         mockState.readFile.mockReset();
         mockState.readFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     });
 
-    it('reads ~/.codex/models_cache.json as the primary source (matching `codex /model`)', async () => {
+    it('uses app-server fields as authoritative and supplements cache-only models', async () => {
         mockState.readFile.mockResolvedValueOnce(JSON.stringify({
             models: [
                 {
@@ -107,16 +105,9 @@ describe('codexModelList', () => {
                     ],
                 },
                 {
-                    slug: 'gpt-5.4',
-                    display_name: 'gpt-5.4',
-                    description: 'Strong everyday',
+                    slug: 'cache-only-model',
+                    display_name: 'Cache only',
                     priority: 2,
-                    visibility: 'list',
-                },
-                {
-                    slug: 'gpt-5.3-codex',
-                    display_name: 'gpt-5.3-codex',
-                    priority: 6,
                     visibility: 'list',
                 },
                 {
@@ -127,23 +118,45 @@ describe('codexModelList', () => {
             ],
         }));
 
-        const models = await codexModelList();
+        const resultPromise = codexModelList();
+        const proc = await waitForSpawn();
+        await waitForRequests(proc, 1);
+        proc.respond({ id: 1, result: {} });
+        await waitForRequests(proc, 2);
+        proc.respond({
+            id: 2,
+            result: {
+                data: [
+                    {
+                        model: 'gpt-5.5',
+                        displayName: 'Native GPT-5.5',
+                        isDefault: true,
+                        defaultReasoningEffort: 'high',
+                        supportedReasoningEfforts: [
+                            { reasoningEffort: 'low', label: 'Low' },
+                            { reasoningEffort: 'high', label: 'High' },
+                            { reasoningEffort: 'future', label: 'Future' },
+                        ],
+                    },
+                    { model: 'native-only-model' },
+                ],
+                nextCursor: null,
+            },
+        });
 
-        // app-server is NOT spawned when the cache hits.
-        expect(mockState.spawn).not.toHaveBeenCalled();
+        const models = await resultPromise;
 
-        // Visibility=hidden is filtered out; remaining three are priority-sorted.
-        expect(models.map(m => m.model)).toEqual(['gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex']);
+        expect(models.map(m => m.model)).toEqual(['gpt-5.5', 'native-only-model', 'cache-only-model']);
+        expect(models[0].displayName).toBe('Native GPT-5.5');
 
-        // First (lowest priority) is marked default.
         expect(models[0].isDefault).toBe(true);
         expect(models[1].isDefault).toBeUndefined();
 
-        // Reasoning levels are remapped from snake_case to the wire shape.
-        expect(models[0].defaultReasoningEffort).toBe('medium');
+        expect(models[0].defaultReasoningEffort).toBe('high');
         expect(models[0].supportedReasoningEfforts).toEqual([
-            { reasoningEffort: 'low', description: 'Fast' },
-            { reasoningEffort: 'medium', description: 'Balanced' },
+            { reasoningEffort: 'low', label: 'Low' },
+            { reasoningEffort: 'high', label: 'High' },
+            { reasoningEffort: 'future', label: 'Future' },
         ]);
     });
 

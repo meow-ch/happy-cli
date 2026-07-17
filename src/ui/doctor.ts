@@ -93,7 +93,7 @@ export async function runDoctorCommand(filter?: 'all' | 'daemon'): Promise<void>
         // Daemon spawn diagnostics
         console.log(chalk.bold('🔧 Daemon Spawn Diagnostics'));
         const projectRoot = projectPath();
-        const wrapperPath = join(projectRoot, 'bin', 'happy.mjs');
+        const wrapperPath = join(projectRoot, 'bin', `${configuration.cliName}.mjs`);
         const cliEntrypoint = join(projectRoot, 'dist', 'index.mjs');
         
         console.log(`Project Root: ${chalk.blue(projectRoot)}`);

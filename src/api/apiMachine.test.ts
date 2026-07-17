@@ -19,14 +19,17 @@ describe('Agent Plane session preparation RPC', () => {
                 { path: 'AGENTS.md', content: 'codex primer' },
                 { path: 'CLAUDE.md', content: 'primer' },
                 { path: '.mcp.json', content: '{"ok":true}' },
+                { path: '.claude/settings.local.json', content: '{"enabledMcpjsonServers":["stackive"]}' },
                 { path: 'conversation-history.md', content: '# Conversation History\n\nhello' },
             ],
         });
 
-        expect(result).toEqual({ type: 'success', directory, filesWritten: 4 });
+        expect(result).toEqual({ type: 'success', directory, filesWritten: 5 });
         await expect(readFile(join(directory, 'AGENTS.md'), 'utf8')).resolves.toBe('codex primer');
         await expect(readFile(join(directory, 'CLAUDE.md'), 'utf8')).resolves.toBe('primer');
         await expect(readFile(join(directory, '.mcp.json'), 'utf8')).resolves.toBe('{"ok":true}');
+        await expect(readFile(join(directory, '.claude', 'settings.local.json'), 'utf8'))
+            .resolves.toBe('{"enabledMcpjsonServers":["stackive"]}');
         await expect(readFile(join(directory, 'conversation-history.md'), 'utf8')).resolves.toBe('# Conversation History\n\nhello');
 
         await rm(directory, { recursive: true, force: true });
@@ -117,6 +120,25 @@ describe('Agent Plane session preparation RPC', () => {
         await rm(directory, { recursive: true, force: true });
         await rm(outside, { recursive: true, force: true });
     });
+
+    it('does not follow a pre-existing .claude directory symlink', async () => {
+        const directory = join(tmpdir(), 'conversations', `api-machine-test-${Date.now()}`);
+        const outside = await mkdtemp(join(tmpdir(), 'api-machine-outside-'));
+        await rm(directory, { recursive: true, force: true });
+        await __testAgentPlaneSessionPrep.prepareAgentPlaneSession({
+            directory,
+            files: [{ path: 'CLAUDE.md', content: 'primer' }],
+        });
+        await symlink(outside, join(directory, '.claude'));
+
+        await expect(__testAgentPlaneSessionPrep.prepareAgentPlaneSession({
+            directory,
+            files: [{ path: '.claude/settings.local.json', content: '{}' }],
+        })).rejects.toThrow(/not a plain directory/);
+
+        await rm(directory, { recursive: true, force: true });
+        await rm(outside, { recursive: true, force: true });
+    });
 });
 
 describe('machine session status RPC', () => {
@@ -142,8 +164,8 @@ describe('machine session status RPC', () => {
             capabilities: {
                 agentPlaneSessionPrep: {
                     supported: true,
-                    allowedFiles: ['AGENTS.md', 'CLAUDE.md', '.mcp.json', 'conversation-history.md'],
-                    maxFiles: 4,
+                    allowedFiles: ['AGENTS.md', 'CLAUDE.md', '.mcp.json', '.claude/settings.local.json', 'conversation-history.md'],
+                    maxFiles: 5,
                     maxFileBytes: 2 * 1024 * 1024,
                 },
                 agentPlaneImageReferences: {

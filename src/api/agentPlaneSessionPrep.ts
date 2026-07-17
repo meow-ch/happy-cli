@@ -21,9 +21,15 @@ export type PrepareAgentPlaneSessionResponse = {
 };
 
 // Keep this allowlist in sync with the Agent Plane secure session prep bundle.
-export const AGENT_PLANE_SESSION_ALLOWED_FILE_NAMES = ['AGENTS.md', 'CLAUDE.md', '.mcp.json', 'conversation-history.md'] as const;
+export const AGENT_PLANE_SESSION_ALLOWED_FILE_NAMES = [
+    'AGENTS.md',
+    'CLAUDE.md',
+    '.mcp.json',
+    '.claude/settings.local.json',
+    'conversation-history.md',
+] as const;
 export const AGENT_PLANE_SESSION_ALLOWED_FILES = new Set<string>(AGENT_PLANE_SESSION_ALLOWED_FILE_NAMES);
-export const AGENT_PLANE_SESSION_MAX_FILES = 4;
+export const AGENT_PLANE_SESSION_MAX_FILES = 5;
 export const AGENT_PLANE_SESSION_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const AGENT_PLANE_CONVERSATION_ID_PATTERN = /^conv_[A-Za-z0-9_-]{8,120}$/;
 
@@ -119,7 +125,9 @@ export async function prepareAgentPlaneSession(params: PrepareAgentPlaneSessionR
     let filesWritten = 0;
     for (const file of params.files) {
         const target = assertRelativeSessionFilePath(directory, file.path);
-        await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+        const parentDirectory = dirname(target);
+        await mkdir(parentDirectory, { recursive: true, mode: 0o700 });
+        await assertPlainDirectory(parentDirectory);
         await writeSessionFileNoFollow(target, String(file.content ?? ''));
         filesWritten += 1;
     }

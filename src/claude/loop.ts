@@ -28,6 +28,9 @@ export interface EnhancedMode {
     appendSystemPrompt?: string;
     allowedTools?: string[];
     disallowedTools?: string[];
+    terminalProtocol?: 1;
+    /** Durable inbound prompt id used to correlate authoritative terminals. */
+    promptLocalId?: string;
     // Images attached to this message
     images?: ImageContent[];
 }

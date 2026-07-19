@@ -179,6 +179,61 @@ describe('ApiSessionClient connection handling', () => {
         await client.close();
     });
 
+    it('injects the canonical prompt localId as UserMessage.localKey when absent', async () => {
+        const remote = {
+            ...storedMessage(1, {
+                role: 'user',
+                content: { type: 'text', text: 'correlated prompt' },
+            }),
+            localId: 'prompt_local_123',
+        };
+        fetchInboxPage.mockImplementation(async (afterSeq: number) => ({
+            messages: afterSeq < 1 ? [remote] : [],
+            hasMore: false,
+            nextAfterSeq: Math.max(afterSeq, 1),
+        }));
+        const received: Array<{ localKey?: string }> = [];
+        const client = new ApiSessionClient('fake-token', mockSession, options());
+        client.onUserMessage((message) => {
+            received.push(message);
+        });
+
+        mockSocket.connected = true;
+        socketHandlers.get('connect')?.();
+        await vi.waitFor(() => expect(received).toHaveLength(1));
+
+        expect(received[0].localKey).toBe('prompt_local_123');
+        await client.close();
+    });
+
+    it('preserves an explicit UserMessage.localKey for compatible older clients', async () => {
+        const remote = {
+            ...storedMessage(1, {
+                role: 'user',
+                content: { type: 'text', text: 'already correlated' },
+                localKey: 'explicit_local_key',
+            }),
+            localId: 'canonical_outbox_id',
+        };
+        fetchInboxPage.mockImplementation(async (afterSeq: number) => ({
+            messages: afterSeq < 1 ? [remote] : [],
+            hasMore: false,
+            nextAfterSeq: Math.max(afterSeq, 1),
+        }));
+        const received: Array<{ localKey?: string }> = [];
+        const client = new ApiSessionClient('fake-token', mockSession, options());
+        client.onUserMessage((message) => {
+            received.push(message);
+        });
+
+        mockSocket.connected = true;
+        socketHandlers.get('connect')?.();
+        await vi.waitFor(() => expect(received).toHaveLength(1));
+
+        expect(received[0].localKey).toBe('explicit_local_key');
+        await client.close();
+    });
+
     it('periodically heals a missed live notification while connected', async () => {
         let available = false;
         const remote = storedMessage(1, { role: 'user', content: { type: 'text', text: 'periodic recovery' } });

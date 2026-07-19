@@ -22,6 +22,7 @@ export interface PersistedDaemonSession {
   thinking?: boolean;
   pendingOutbox?: number;
   activityReportedAt?: number;
+  terminalProtocol?: 1;
 }
 
 interface PersistedDaemonSessionRegistry {
@@ -64,6 +65,7 @@ function normalizeSession(value: unknown): PersistedDaemonSession | null {
   if (typeof value.activityReportedAt === 'number' && Number.isFinite(value.activityReportedAt)) {
     session.activityReportedAt = value.activityReportedAt;
   }
+  if (value.terminalProtocol === 1) session.terminalProtocol = 1;
   return session;
 }
 
@@ -125,6 +127,9 @@ export function upsertDaemonSessionRecord(
   if (sameProcess && existing?.thinking !== undefined) next.thinking = existing.thinking;
   if (sameProcess && existing?.pendingOutbox !== undefined) next.pendingOutbox = existing.pendingOutbox;
   if (sameProcess && existing?.activityReportedAt !== undefined) next.activityReportedAt = existing.activityReportedAt;
+  const terminalProtocol = input.metadata?.terminalProtocol
+    ?? (sameProcess ? existing?.terminalProtocol : undefined);
+  if (terminalProtocol === 1) next.terminalProtocol = 1;
   const path = input.metadata?.path ?? existing?.path;
   const flavor = input.metadata?.flavor ?? existing?.flavor;
   if (path) next.path = path;

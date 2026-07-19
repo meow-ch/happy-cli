@@ -174,6 +174,14 @@ describe('machine session status RPC', () => {
                     maxImageBytes: 8 * 1024 * 1024,
                     requiresSha256: true,
                 },
+                agentPlaneAuthoritativeTerminals: {
+                    supported: true,
+                    protocolVersion: 1,
+                    providers: ['claude'],
+                    transport: 'acp',
+                    terminalTypes: ['task_complete', 'task_failed', 'turn_aborted'],
+                    legacyReady: 'ui_idle_only',
+                },
                 agentPlaneGoals: {
                     supported: true,
                     toolNames: ['create_goal', 'get_goal', 'update_goal'],
@@ -282,7 +290,49 @@ describe('machine session status RPC', () => {
                 },
             },
             codexUseBuiltInHappyMcp: false,
+            requiredTerminalProtocol: undefined,
         }]);
+    });
+
+    it('forwards and returns the exact child terminal-protocol attestation', async () => {
+        const client = new ApiMachineClient('token', {
+            id: 'machine_test',
+            name: 'machine_test',
+            encryptionKey: new Uint8Array(32),
+            encryptionVariant: 'legacy',
+            metadata: null,
+            metadataVersion: 0,
+            daemonState: null,
+            daemonStateVersion: 0,
+        } as any);
+        const calls: unknown[] = [];
+
+        client.setRPCHandlers({
+            spawnSession: async (options) => {
+                calls.push(options);
+                return { type: 'success', sessionId: 'sid_claude_v1', terminalProtocol: 1 };
+            },
+            stopSession: () => false,
+            sessionStatusList: () => [],
+            requestShutdown: () => {},
+        });
+
+        const manager = (client as any).rpcHandlerManager;
+        const handler = manager.handlers.get('machine_test:spawn-happy-session');
+        await expect(handler({
+            directory: '/tmp/conversations/conv_v1',
+            agent: 'claude',
+            requiredTerminalProtocol: 1,
+        })).resolves.toEqual({
+            type: 'success',
+            sessionId: 'sid_claude_v1',
+            terminalProtocol: 1,
+        });
+        expect(calls).toEqual([expect.objectContaining({
+            directory: '/tmp/conversations/conv_v1',
+            agent: 'claude',
+            requiredTerminalProtocol: 1,
+        })]);
     });
 
     it('registers session-status-list and delegates to daemon session tracking', async () => {
@@ -304,6 +354,7 @@ describe('machine session status RPC', () => {
                 sessionId,
                 status: sessionId === 'sid_live' ? 'tracked_alive' : 'unknown',
                 pid: sessionId === 'sid_live' ? 123 : undefined,
+                terminalProtocol: sessionId === 'sid_live' ? 1 : undefined,
             })),
             requestShutdown: () => {},
         });
@@ -315,8 +366,8 @@ describe('machine session status RPC', () => {
         await expect(handler({ sessionIds: ['sid_live', '', 42, 'sid_missing'] })).resolves.toEqual({
             success: true,
             sessions: [
-                { sessionId: 'sid_live', status: 'tracked_alive', pid: 123 },
-                { sessionId: 'sid_missing', status: 'unknown', pid: undefined },
+                { sessionId: 'sid_live', status: 'tracked_alive', pid: 123, terminalProtocol: 1 },
+                { sessionId: 'sid_missing', status: 'unknown', pid: undefined, terminalProtocol: undefined },
             ],
         });
     });

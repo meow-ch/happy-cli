@@ -45,6 +45,45 @@ import {
 
 const SESSION_WEBHOOK_TIMEOUT_MS = 15_000;
 
+function validateRequiredTerminalProtocol(options: SpawnSessionOptions): string | null {
+  if (options.requiredTerminalProtocol === undefined) return null;
+  if (options.requiredTerminalProtocol !== 1) {
+    return `Unsupported required terminal protocol: ${String(options.requiredTerminalProtocol)}`;
+  }
+  if ((options.agent ?? 'claude') !== 'claude') {
+    return 'Authoritative terminal protocol 1 is currently supported only for Claude sessions.';
+  }
+  return null;
+}
+
+function attestedSpawnResult(
+  session: TrackedSession,
+  requiredTerminalProtocol?: 1,
+): SpawnSessionResult {
+  if (!session.happySessionId) {
+    return { type: 'error', errorMessage: 'Spawned child did not report a session ID.' };
+  }
+  if (requiredTerminalProtocol !== undefined
+    && session.terminalProtocol !== requiredTerminalProtocol) {
+    return {
+      type: 'error',
+      errorMessage: `Spawned child did not attest required terminal protocol ${requiredTerminalProtocol}.`,
+    };
+  }
+  return {
+    type: 'success',
+    sessionId: session.happySessionId,
+    ...(session.terminalProtocol !== undefined
+      ? { terminalProtocol: session.terminalProtocol }
+      : {}),
+  };
+}
+
+export const __testDaemonTerminalProtocol = {
+  validateRequiredTerminalProtocol,
+  attestedSpawnResult,
+};
+
 // Prepare initial metadata
 export const initialMachineMetadata: MachineMetadata = {
   host: os.hostname(),
@@ -282,6 +321,7 @@ export async function startDaemon(): Promise<void> {
           thinking: record.thinking,
           pendingOutbox: record.pendingOutbox,
           activityReportedAt: record.activityReportedAt,
+          terminalProtocol: record.terminalProtocol,
         });
         logger.debug(`[DAEMON RUN] Re-adopted session ${record.sessionId} from registry PID ${record.pid}`);
       }
@@ -321,6 +361,7 @@ export async function startDaemon(): Promise<void> {
         // Update daemon-spawned session with reported data
         existingSession.happySessionId = sessionId;
         existingSession.happySessionMetadataFromLocalWebhook = sessionMetadata;
+        existingSession.terminalProtocol = sessionMetadata.terminalProtocol === 1 ? 1 : undefined;
         existingSession.trackingSource = existingSession.trackingSource ?? 'memory';
         const persisted = upsertDaemonSessionRecord({
           sessionId,
@@ -352,6 +393,7 @@ export async function startDaemon(): Promise<void> {
           lastActivityAt: Date.now(),
           thinking: false,
           pendingOutbox: 0,
+          terminalProtocol: sessionMetadata.terminalProtocol === 1 ? 1 : undefined,
         };
         pidToTrackedSession.set(pid, trackedSession);
         upsertDaemonSessionRecord({
@@ -393,6 +435,11 @@ export async function startDaemon(): Promise<void> {
     // Spawn a new session (sessionId reserved for future --resume functionality)
     const spawnSession = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
       logger.debugLargeJson('[DAEMON RUN] Spawning session', options);
+
+      const protocolValidationError = validateRequiredTerminalProtocol(options);
+      if (protocolValidationError) {
+        return { type: 'error', errorMessage: protocolValidationError };
+      }
 
       const { directory, sessionId, machineId, approvedNewDirectoryCreation = true } = options;
       let directoryCreated = false;
@@ -644,10 +691,12 @@ export async function startDaemon(): Promise<void> {
               };
             }
             logger.debug(`[DAEMON RUN] Session ${webhookResult.session.happySessionId} fully spawned with webhook (tmux)`);
-            return {
-              type: 'success',
-              sessionId: webhookResult.session.happySessionId!
-            };
+            const attested = attestedSpawnResult(
+              webhookResult.session,
+              options.requiredTerminalProtocol,
+            );
+            if (attested.type === 'error') stopSession(`PID-${tmuxResult.pid}`);
+            return attested;
           } else {
             logger.debug(`[DAEMON RUN] Failed to spawn in tmux: ${tmuxResult.error}, falling back to regular spawning`);
             useTmux = false;
@@ -759,10 +808,12 @@ export async function startDaemon(): Promise<void> {
             };
           }
           logger.debug(`[DAEMON RUN] Session ${webhookResult.session.happySessionId} fully spawned with webhook`);
-          return {
-            type: 'success',
-            sessionId: webhookResult.session.happySessionId!
-          };
+          const attested = attestedSpawnResult(
+            webhookResult.session,
+            options.requiredTerminalProtocol,
+          );
+          if (attested.type === 'error') stopSession(`PID-${happyProcess.pid}`);
+          return attested;
         }
 
         // This should never be reached, but TypeScript requires a return statement
@@ -829,6 +880,7 @@ export async function startDaemon(): Promise<void> {
       pid: number;
       startedBy: string;
       trackingSource: 'memory' | 'registry';
+      terminalProtocol?: 1;
     } => {
       const trackingSource = session.trackingSource ?? 'memory';
       const alive = pidIsAlive(pid);
@@ -840,6 +892,7 @@ export async function startDaemon(): Promise<void> {
         pid,
         startedBy: session.startedBy,
         trackingSource,
+        terminalProtocol: session.terminalProtocol,
       };
     };
 

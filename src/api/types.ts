@@ -327,6 +327,7 @@ export const MessageMetaSchema = z.object({
   allowedTools: z.array(z.string()).nullable().optional(), // Allowed tools for this message (null = reset)
   disallowedTools: z.array(z.string()).nullable().optional(), // Disallowed tools for this message (null = reset)
   reasoningEffort: z.string().nullable().optional(), // Reasoning effort for this message (null = reset)
+  terminalProtocol: z.literal(1).optional(), // Agent Plane authoritative runtime-terminal protocol requested for this turn
   runtimeGoalCommand: z.object({
     action: z.enum(['start', 'view', 'pause', 'resume', 'clear']),
     objective: z.string().optional()
@@ -459,6 +460,8 @@ export type Metadata = {
   archivedBy?: string,
   archiveReason?: string,
   flavor?: string
+  /** Session-process attestation for authoritative Agent Plane terminals. */
+  terminalProtocol?: 1
 };
 
 export type AgentRequestKind = 'permission' | 'questionnaire' | 'plan_decision'

@@ -36,6 +36,7 @@ describe('daemon session registry', () => {
         startedBy: 'daemon',
         path: '/tmp/work',
         flavor: 'codex',
+        terminalProtocol: 1,
         startedAt: 100,
         updatedAt: 100,
       },
@@ -48,10 +49,40 @@ describe('daemon session registry', () => {
         startedBy: 'daemon',
         path: '/tmp/work',
         flavor: 'codex',
+        terminalProtocol: 1,
         startedAt: 100,
         updatedAt: 100,
       },
     ]);
+  });
+
+  it('persists protocol proof only when reported by the exact session process', () => {
+    const path = registryPath();
+    const attested = upsertDaemonSessionRecord({
+      sessionId: 'sid_v1',
+      pid: 333,
+      startedBy: 'daemon',
+      metadata: {
+        hostPid: 333,
+        path: '/tmp/v1',
+        flavor: 'claude',
+        terminalProtocol: 1,
+      } as any,
+    }, path);
+    expect(attested.terminalProtocol).toBe(1);
+    expect(readDaemonSessionRegistry(path)[0]?.terminalProtocol).toBe(1);
+
+    const legacyReplacement = upsertDaemonSessionRecord({
+      sessionId: 'sid_v1',
+      pid: 444,
+      startedBy: 'daemon',
+      metadata: {
+        hostPid: 444,
+        path: '/tmp/legacy',
+        flavor: 'claude',
+      } as any,
+    }, path);
+    expect(legacyReplacement).not.toHaveProperty('terminalProtocol');
   });
 
   it('upserts by session id and pid', () => {

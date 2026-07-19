@@ -33,6 +33,7 @@ export interface SDKAssistantMessage extends SDKMessage {
     parent_tool_use_id?: string
     message: {
         role: 'assistant'
+        stop_reason?: string | null
         content: Array<{
             type: string
             text?: string
@@ -70,6 +71,9 @@ export interface SDKResultMessage extends SDKMessage {
     duration_api_ms: number
     is_error: boolean
     session_id: string
+    terminal_reason?: string
+    stop_reason?: string | null
+    error?: string
 }
 
 export interface SDKControlResponse extends SDKMessage {

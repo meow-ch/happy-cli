@@ -1,5 +1,5 @@
 import { EnhancedMode, ImageContent } from "./loop";
-import { query, type QueryOptions, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage } from '@/claude/sdk'
+import { query, type QueryOptions, type SDKMessage, type SDKResultMessage, type SDKSystemMessage, AbortError, SDKUserMessage } from '@/claude/sdk'
 import { mapToClaudeMode } from "./utils/permissionMode";
 import { claudeCheckSession } from "./utils/claudeCheckSession";
 import { join, resolve } from 'node:path';
@@ -12,6 +12,38 @@ import { awaitFileExist } from "@/modules/watcher/awaitFileExist";
 import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import type { JsRuntime } from "./runClaude";
+import { randomUUID } from 'node:crypto';
+
+type ClaudeRemoteTurn = { id: string; terminalProtocol?: 1 };
+
+function createClaudeTurn(mode: EnhancedMode): ClaudeRemoteTurn {
+    return {
+        // Canonical inbox delivery injects SessionMessage.localId here. The
+        // random fallback is only for legacy rows which have no durable id.
+        id: mode.promptLocalId || randomUUID(),
+        ...(mode.terminalProtocol === 1 ? { terminalProtocol: 1 as const } : {}),
+    };
+}
+
+function createLocalClaudeSuccessResult(sessionId: string | null, result: string): SDKResultMessage {
+    return {
+        type: 'result',
+        subtype: 'success',
+        result,
+        num_turns: 0,
+        total_cost_usd: 0,
+        duration_ms: 0,
+        duration_api_ms: 0,
+        is_error: false,
+        session_id: sessionId ?? 'local-command',
+        terminal_reason: 'completed',
+    };
+}
+
+export const __testClaudeRemoteInternals = {
+    createClaudeTurn,
+    createLocalClaudeSuccessResult,
+};
 
 /**
  * Build message content for Claude SDK - either string or multipart array with images
@@ -72,7 +104,11 @@ export async function claudeRemote(opts: {
 
     // Dynamic parameters
     nextMessage: () => Promise<{ message: string, mode: EnhancedMode } | null>,
-    onReady: () => void,
+    onTurnStarted: (turn: ClaudeRemoteTurn) => void | Promise<void>,
+    onResult: (
+        result: SDKResultMessage,
+        turn: ClaudeRemoteTurn,
+    ) => void | Promise<void>,
     isAborted: (toolCallId: string) => boolean,
 
     // Callbacks
@@ -127,9 +163,15 @@ export async function claudeRemote(opts: {
     if (!initial) { // No initial message - exit
         return;
     }
+    let activeTurn = createClaudeTurn(initial.mode);
 
     // Handle special commands
     const specialCommand = parseSpecialCommand(initial.message);
+
+    // Every accepted protocol-v1 prompt receives a correlated start and one
+    // explicit terminal, including commands completed locally without an SDK
+    // query.
+    await opts.onTurnStarted(activeTurn);
 
     // Handle /clear command
     if (specialCommand.type === 'clear') {
@@ -139,6 +181,10 @@ export async function claudeRemote(opts: {
         if (opts.onSessionReset) {
             opts.onSessionReset();
         }
+        await opts.onResult(
+            createLocalClaudeSuccessResult(opts.sessionId, 'Context was reset.'),
+            activeTurn,
+        );
         return;
     }
 
@@ -249,8 +295,10 @@ export async function claudeRemote(opts: {
                     isCompactCommand = false;
                 }
 
-                // Send ready event
-                opts.onReady();
+                // The launcher must serialize provider output, synthetic tool
+                // cleanup, and this authoritative terminal into one durable
+                // stream before Claude can accept the next prompt.
+                await opts.onResult(message as SDKResultMessage, activeTurn);
 
                 // Push next message
                 const next = await opts.nextMessage();
@@ -259,6 +307,8 @@ export async function claudeRemote(opts: {
                     return;
                 }
                 mode = next.mode;
+                activeTurn = createClaudeTurn(next.mode);
+                await opts.onTurnStarted(activeTurn);
                 messages.push({ type: 'user', message: { role: 'user', content: buildMessageContent(next.message, next.mode.images) } });
             }
 

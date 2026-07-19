@@ -88,12 +88,14 @@ type MachineRpcHandlers = {
         pid?: number;
         startedBy?: string;
         trackingSource?: 'memory' | 'registry';
+        terminalProtocol?: 1;
     }> | Promise<Array<{
         sessionId: string;
         status: DaemonSessionStatus;
         pid?: number;
         startedBy?: string;
         trackingSource?: 'memory' | 'registry';
+        terminalProtocol?: 1;
     }>>;
     requestShutdown: () => void;
 }
@@ -123,6 +125,14 @@ export function buildDaemonCapabilities() {
                 sourceTypes: ['url'],
                 maxImageBytes: 8 * 1024 * 1024,
                 requiresSha256: true,
+            },
+            agentPlaneAuthoritativeTerminals: {
+                supported: true,
+                protocolVersion: 1,
+                providers: ['claude'],
+                transport: 'acp',
+                terminalTypes: ['task_complete', 'task_failed', 'turn_aborted'],
+                legacyReady: 'ui_idle_only',
             },
             agentPlaneGoals: {
                 supported: true,
@@ -237,11 +247,15 @@ export class ApiMachineClient {
                 environmentVariables,
                 codexMcpServers,
                 codexUseBuiltInHappyMcp,
+                requiredTerminalProtocol,
             } = params || {};
             logger.debug(`[API MACHINE] Spawning session with params: ${JSON.stringify(params)}`);
 
             if (!directory) {
                 throw new Error('Directory is required');
+            }
+            if (requiredTerminalProtocol !== undefined && requiredTerminalProtocol !== 1) {
+                throw new Error('Unsupported requiredTerminalProtocol');
             }
 
             const result = await spawnSession({
@@ -254,12 +268,19 @@ export class ApiMachineClient {
                 environmentVariables,
                 codexMcpServers,
                 codexUseBuiltInHappyMcp,
+                requiredTerminalProtocol,
             });
 
             switch (result.type) {
                 case 'success':
                     logger.debug(`[API MACHINE] Spawned session ${result.sessionId}`);
-                    return { type: 'success', sessionId: result.sessionId };
+                    return {
+                        type: 'success',
+                        sessionId: result.sessionId,
+                        ...(result.terminalProtocol !== undefined
+                            ? { terminalProtocol: result.terminalProtocol }
+                            : {}),
+                    };
 
                 case 'requestToApproveDirectoryCreation':
                     logger.debug(`[API MACHINE] Requesting directory creation approval for: ${result.directory}`);

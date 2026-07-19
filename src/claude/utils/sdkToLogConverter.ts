@@ -266,10 +266,19 @@ export class SDKToLogConverter {
      * @param toolUseId - The ID of the tool that was interrupted
      * @param parentToolUseId - Optional parent tool ID if this is a sidechain tool
      */
-    generateInterruptedToolResult(toolUseId: string, parentToolUseId?: string | null): RawJSONLines {
+    generateInterruptedToolResult(
+        toolUseId: string,
+        parentToolUseId?: string | null,
+        terminalReason = 'interrupted',
+    ): RawJSONLines {
         const uuid = randomUUID()
         const timestamp = new Date().toISOString()
-        const errorMessage = "[Request interrupted by user for tool use]"
+        const safeReason = terminalReason
+            .toLowerCase()
+            .replace(/[^a-z0-9_.-]+/g, '_')
+            .replace(/^_+|_+$/g, '')
+            .slice(0, 80) || 'interrupted'
+        const errorMessage = `[Tool call ended without a result before terminal: ${safeReason}]`
         
         // Determine if this is a sidechain and get parent UUID
         let isSidechain = false

@@ -29,4 +29,6 @@ export interface TrackedSession {
   pendingOutbox?: number;
   /** Daemon receipt time for the latest explicit activity report. */
   activityReportedAt?: number;
+  /** Protocol reported by this exact child through its startup webhook. */
+  terminalProtocol?: 1;
 }

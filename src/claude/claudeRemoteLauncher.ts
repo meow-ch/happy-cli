@@ -6,7 +6,7 @@ import React from "react";
 import { claudeRemote } from "./claudeRemote";
 import { PermissionHandler } from "./utils/permissionHandler";
 import { Future } from "@/utils/future";
-import { SDKAssistantMessage, SDKMessage, SDKUserMessage } from "./sdk";
+import { SDKAssistantMessage, SDKMessage, SDKResultMessage, SDKUserMessage } from "./sdk";
 import { formatClaudeMessageForInk } from "@/ui/messageFormatterInk";
 import { logger } from "@/ui/logger";
 import { SDKToLogConverter } from "./utils/sdkToLogConverter";
@@ -15,6 +15,7 @@ import { EnhancedMode } from "./loop";
 import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
+import type { ACPMessageData } from "@/api/apiSession";
 
 interface PermissionsField {
     date: number;
@@ -41,8 +42,181 @@ function extractClaudePlanText(input: unknown): string {
     }
 }
 
+type ClaudeTurn = { id: string; terminalProtocol: 1 };
+type ClaudeTerminalEvent = Extract<ACPMessageData, {
+    type: 'task_complete' | 'task_failed' | 'turn_aborted';
+}>;
+
+const MAX_CLAUDE_TERMINAL_RESULT_CHARS = 16_000;
+const MAX_CLAUDE_TERMINAL_MESSAGE_CHARS = 3_000;
+const MAX_CLAUDE_TERMINAL_CODE_CHARS = 80;
+const SUCCESS_TERMINAL_REASONS = new Set(['success', 'completed', 'end_turn']);
+const INCOMPLETE_ASSISTANT_STOP_REASONS = new Set(['max_tokens', 'tool_use', 'pause_turn']);
+
+function boundedTerminalText(value: unknown, maxChars: number): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const normalized = value
+        .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+        .trim();
+    if (!normalized) return undefined;
+    return normalized.length > maxChars
+        ? `${normalized.slice(0, maxChars)}\n…(truncated)`
+        : normalized;
+}
+
+function boundedTerminalCode(value: unknown): string | undefined {
+    const text = boundedTerminalText(value, MAX_CLAUDE_TERMINAL_CODE_CHARS);
+    if (!text) return undefined;
+    const safe = text.toLowerCase().replace(/[^a-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '');
+    return safe || undefined;
+}
+
+function nextTopLevelAssistantStopReason(
+    current: string | null,
+    message: SDKAssistantMessage,
+): string | null {
+    if (message.parent_tool_use_id != null) return current;
+    if (!Object.prototype.hasOwnProperty.call(message.message, 'stop_reason')) return current;
+    return typeof message.message.stop_reason === 'string' && message.message.stop_reason.trim()
+        ? message.message.stop_reason
+        : null;
+}
+
+function normalizeClaudeResultTerminal(input: {
+    result: SDKResultMessage;
+    turnId: string;
+    terminalProtocol: 1;
+    assistantStopReason?: string | null;
+    pendingToolCallCount?: number;
+}): ClaudeTerminalEvent {
+    const subtype = boundedTerminalCode(input.result.subtype) ?? 'unknown';
+    const providerReason = boundedTerminalCode(input.result.terminal_reason);
+    // The final SDK result is authoritative. Streamed assistant messages can
+    // carry null even when the provider ultimately stops at max_tokens, so the
+    // top-level assistant value is only a compatibility fallback.
+    const stopReason = boundedTerminalCode(input.result.stop_reason)
+        ?? boundedTerminalCode(input.assistantStopReason);
+    const providerReasonFailed = !!providerReason && !SUCCESS_TERMINAL_REASONS.has(providerReason);
+    const stoppedIncomplete = !!stopReason && INCOMPLETE_ASSISTANT_STOP_REASONS.has(stopReason);
+    const failed = input.result.is_error !== false
+        || subtype !== 'success'
+        || providerReasonFailed
+        || stoppedIncomplete
+        || (input.pendingToolCallCount ?? 0) > 0;
+    const resultText = boundedTerminalText(
+        input.result.result ?? input.result.error,
+        MAX_CLAUDE_TERMINAL_RESULT_CHARS,
+    );
+
+    if (!failed) {
+        return {
+            type: 'task_complete',
+            id: input.turnId,
+            terminal_protocol: input.terminalProtocol,
+            subtype,
+            reason: providerReason ?? stopReason ?? 'completed',
+            is_error: false,
+            ...(resultText ? { result: resultText } : {}),
+        };
+    }
+
+    const reason = providerReasonFailed
+        ? providerReason
+        : stoppedIncomplete
+            ? stopReason
+            : subtype !== 'success'
+                ? subtype
+                : (input.pendingToolCallCount ?? 0) > 0
+                    ? 'pending_tool_calls'
+                    : input.result.is_error === true
+                        ? 'claude_result_error'
+                        : 'invalid_is_error';
+    const failureMessage = reason === 'max_tokens'
+        ? 'Claude reached its output token limit before completing the turn.'
+        : reason === 'pending_tool_calls'
+            ? 'Claude ended while one or more tool calls were still unresolved.'
+            : reason === 'api_error'
+                ? 'Claude reported an API error before completing the turn.'
+                : reason === 'error_max_turns'
+                    ? 'Claude exceeded its maximum turn limit before completing the task.'
+                    : reason === 'error_during_execution'
+                        ? 'Claude failed during execution before completing the turn.'
+                        : reason === 'tool_use' || reason === 'pause_turn'
+                            ? `Claude ended with an incomplete ${reason} stop condition.`
+                            : reason === 'invalid_is_error'
+                                ? 'Claude result did not explicitly attest is_error=false; the turn was treated as failed.'
+                                : `Claude turn failed before completion (reason: ${reason}).`;
+    return {
+        type: 'task_failed',
+        id: input.turnId,
+        terminal_protocol: input.terminalProtocol,
+        subtype,
+        reason,
+        is_error: true,
+        code: reason,
+        // Keep partial provider output in result. The failure message remains
+        // causal and stable so recovery/UI cannot mistake partial prose for
+        // the reason the turn failed.
+        message: failureMessage,
+        ...(resultText ? { result: resultText } : {}),
+    };
+}
+
+function normalizeClaudeExitTerminal(input: {
+    turn: ClaudeTurn;
+    kind: 'aborted' | 'failed';
+    reason: string;
+    message?: string;
+}): ClaudeTerminalEvent {
+    const reason = boundedTerminalCode(input.reason)
+        ?? (input.kind === 'aborted' ? 'user_abort' : 'unexpected_provider_exit');
+    if (input.kind === 'aborted') {
+        return {
+            type: 'turn_aborted',
+            id: input.turn.id,
+            terminal_protocol: input.turn.terminalProtocol,
+            subtype: 'aborted',
+            reason,
+            is_error: true,
+        };
+    }
+
+    const fallbackMessage = 'Claude exited before reporting a provider result.';
+    return {
+        type: 'task_failed',
+        id: input.turn.id,
+        terminal_protocol: input.turn.terminalProtocol,
+        subtype: 'error',
+        reason,
+        is_error: true,
+        code: reason,
+        message: boundedTerminalText(input.message, MAX_CLAUDE_TERMINAL_MESSAGE_CHARS)
+            ?? fallbackMessage,
+    };
+}
+
+async function emitClaudeTerminalAfterToolCleanup<T>(input: {
+    pendingToolCalls: T[];
+    interruptedResult: (pendingToolCall: T) => RawJSONLines;
+    enqueueInterruptedResult: (result: RawJSONLines) => void;
+    flushQueuedOutput: () => Promise<void>;
+    emitTerminal: () => void;
+    emitLegacyReady?: () => void;
+}): Promise<void> {
+    for (const pendingToolCall of input.pendingToolCalls) {
+        input.enqueueInterruptedResult(input.interruptedResult(pendingToolCall));
+    }
+    await input.flushQueuedOutput();
+    input.emitTerminal();
+    input.emitLegacyReady?.();
+}
+
 export const __testClaudeRemoteLauncherInternals = {
     extractClaudePlanText,
+    nextTopLevelAssistantStopReason,
+    normalizeClaudeResultTerminal,
+    normalizeClaudeExitTerminal,
+    emitClaudeTerminalAfterToolCleanup,
 };
 
 function formatUnexpectedClaudeExit(error: unknown): string {
@@ -167,6 +341,9 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let planModeToolCalls = new Set<string>();
     let emittedPlanToolCalls = new Set<string>();
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
+    let lastAssistantStopReason: string | null = null;
+    let activeClaudeTurn: ClaudeTurn | null = null;
+    let fallbackTerminal: ClaudeTerminalEvent | null = null;
 
     function onMessage(message: SDKMessage) {
 
@@ -179,6 +356,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         // Detect plan mode tool call
         if (message.type === 'assistant') {
             let umessage = message as SDKAssistantMessage;
+            lastAssistantStopReason = nextTopLevelAssistantStopReason(lastAssistantStopReason, umessage);
             if (umessage.message.content && Array.isArray(umessage.message.content)) {
                 for (let c of umessage.message.content) {
                     if (c.type === 'tool_use' && (c.name === 'exit_plan_mode' || c.name === 'ExitPlanMode')) {
@@ -385,7 +563,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             let modeHash: string | null = null;
             let mode: EnhancedMode | null = null;
             try {
-                const remoteResult = await claudeRemote({
+                await claudeRemote({
                     sessionId: session.sessionId,
                     path: session.path,
                     allowedTools: session.allowedTools ?? [],
@@ -442,27 +620,121 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         logger.debug('[remote]: Session reset');
                         session.clearSessionId();
                     },
-                    onReady: () => {
-                        if (!pending && session.queue.size() === 0) {
-                            session.client.sendSessionEvent({ type: 'ready' });
-                            session.api.push().sendToAllDevices(
-                                'It\'s ready!',
-                                `Claude is waiting for your command`,
-                                { sessionId: session.client.sessionId }
-                            );
+                    onTurnStarted: (turn) => {
+                        fallbackTerminal = null;
+                        lastAssistantStopReason = null;
+                        if (turn.terminalProtocol !== 1) {
+                            activeClaudeTurn = null;
+                            return;
                         }
+                        activeClaudeTurn = {
+                            id: turn.id,
+                            terminalProtocol: 1,
+                        };
+                        session.client.sendAgentMessage('claude', {
+                            type: 'task_started',
+                            id: turn.id,
+                            terminal_protocol: turn.terminalProtocol,
+                        });
+                    },
+                    onResult: async (result, turn) => {
+                        if (turn.terminalProtocol !== 1) {
+                            lastAssistantStopReason = null;
+                            // Prompts which did not opt into authoritative
+                            // terminals retain the historical Happy contract.
+                            if (!pending && session.queue.size() === 0) {
+                                session.client.sendSessionEvent({ type: 'ready' });
+                                session.api.push().sendToAllDevices(
+                                    'It\'s ready!',
+                                    'Claude is waiting for your command',
+                                    { sessionId: session.client.sessionId },
+                                );
+                            }
+                            return;
+                        }
+                        const pendingToolCalls = Array.from(ongoingToolCalls.entries());
+                        ongoingToolCalls.clear();
+                        const terminal = normalizeClaudeResultTerminal({
+                            result,
+                            turnId: turn.id,
+                            terminalProtocol: turn.terminalProtocol,
+                            assistantStopReason: lastAssistantStopReason,
+                            pendingToolCallCount: pendingToolCalls.length,
+                        });
+                        lastAssistantStopReason = null;
+
+                        const isIdle = !pending && session.queue.size() === 0;
+                        await emitClaudeTerminalAfterToolCleanup({
+                            pendingToolCalls,
+                            interruptedResult: ([toolCallId, { parentToolCallId }]) => (
+                                sdkToLogConverter.generateInterruptedToolResult(
+                                    toolCallId,
+                                    parentToolCallId,
+                                    terminal.reason,
+                                )
+                            ),
+                            enqueueInterruptedResult: (interruptedResult) => {
+                                messageQueue.enqueue(interruptedResult);
+                            },
+                            flushQueuedOutput: () => messageQueue.flush(),
+                            emitTerminal: () => {
+                                session.client.sendAgentMessage('claude', terminal);
+                                activeClaudeTurn = null;
+                                fallbackTerminal = null;
+                            },
+                            emitLegacyReady: isIdle
+                                ? () => {
+                                    session.client.sendSessionEvent({ type: 'ready' });
+                                    if (terminal.type === 'task_complete') {
+                                        session.api.push().sendToAllDevices(
+                                            'It\'s ready!',
+                                            'Claude is waiting for your command',
+                                            { sessionId: session.client.sessionId },
+                                        );
+                                    }
+                                }
+                                : undefined,
+                        });
                     },
                     signal: abortController.signal,
                 });
                 
                 // Consume one-time Claude flags after spawn
                 session.consumeOneTimeFlags();
+
+                if (activeClaudeTurn && !fallbackTerminal) {
+                    fallbackTerminal = controller.signal.aborted
+                        ? normalizeClaudeExitTerminal({
+                            turn: activeClaudeTurn,
+                            kind: 'aborted',
+                            reason: exitReason ? `user_${exitReason}` : 'user_abort',
+                        })
+                        : normalizeClaudeExitTerminal({
+                            turn: activeClaudeTurn,
+                            kind: 'failed',
+                            reason: 'unexpected_provider_exit',
+                        });
+                }
                 
                 if (!exitReason && abortController.signal.aborted) {
                     session.client.sendSessionEvent({ type: 'message', message: 'Aborted by user' });
                 }
             } catch (e) {
                 logger.debug('[remote]: launch error', e);
+                if (activeClaudeTurn && !fallbackTerminal) {
+                    fallbackTerminal = controller.signal.aborted
+                        ? normalizeClaudeExitTerminal({
+                            turn: activeClaudeTurn,
+                            kind: 'aborted',
+                            reason: exitReason ? `user_${exitReason}` : 'user_abort',
+                        })
+                        : normalizeClaudeExitTerminal({
+                            turn: activeClaudeTurn,
+                            kind: 'failed',
+                            reason: 'claude_runtime_error',
+                            message: formatUnexpectedClaudeExit(e),
+                        });
+                }
                 if (!exitReason) {
                     session.client.sendSessionEvent({ type: 'message', message: formatUnexpectedClaudeExit(e) });
                     continue;
@@ -471,19 +743,57 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
 
                 logger.debug('[remote]: launch finally');
 
-                // Terminate all ongoing tool calls
-                for (let [toolCallId, { parentToolCallId }] of ongoingToolCalls) {
-                    const converted = sdkToLogConverter.generateInterruptedToolResult(toolCallId, parentToolCallId);
-                    if (converted) {
-                        logger.debug('[remote]: terminating tool call ' + toolCallId + ' parent: ' + parentToolCallId);
-                        session.client.sendClaudeSessionMessage(converted);
-                    }
-                }
+                const pendingToolCalls = Array.from(ongoingToolCalls.entries());
                 ongoingToolCalls.clear();
 
-                // Flush any remaining messages in the queue
-                logger.debug('[remote]: flushing message queue');
-                await messageQueue.flush();
+                // A started v1 turn must always end with an explicit terminal,
+                // including aborts and provider exits that produce no SDK
+                // result. The durable message outbox preserves this ordering
+                // after the synthetic tool results flushed above.
+                if (activeClaudeTurn) {
+                    const terminal = fallbackTerminal ?? normalizeClaudeExitTerminal({
+                        turn: activeClaudeTurn,
+                        kind: controller.signal.aborted ? 'aborted' : 'failed',
+                        reason: controller.signal.aborted ? 'user_abort' : 'unexpected_provider_exit',
+                    });
+                    await emitClaudeTerminalAfterToolCleanup({
+                        pendingToolCalls,
+                        interruptedResult: ([toolCallId, { parentToolCallId }]) => (
+                            sdkToLogConverter.generateInterruptedToolResult(
+                                toolCallId,
+                                parentToolCallId,
+                                terminal.reason,
+                            )
+                        ),
+                        enqueueInterruptedResult: (interruptedResult) => {
+                            logger.debug('[remote]: terminating unresolved tool call before terminal');
+                            messageQueue.enqueue(interruptedResult);
+                        },
+                        flushQueuedOutput: () => messageQueue.flush(),
+                        emitTerminal: () => {
+                            session.client.sendAgentMessage('claude', terminal);
+                            activeClaudeTurn = null;
+                            fallbackTerminal = null;
+                            lastAssistantStopReason = null;
+                        },
+                        // Preserve legacy ready strictly as an idle/UI hint,
+                        // and only after the authoritative ACP terminal. Agent
+                        // Plane protocol v1 ignores this hint for turn outcome.
+                        emitLegacyReady: !exitReason && !pending && session.queue.size() === 0
+                            ? () => session.client.sendSessionEvent({ type: 'ready' })
+                            : undefined,
+                    });
+                } else {
+                    for (const [toolCallId, { parentToolCallId }] of pendingToolCalls) {
+                        logger.debug('[remote]: terminating orphaned tool call ' + toolCallId);
+                        messageQueue.enqueue(sdkToLogConverter.generateInterruptedToolResult(
+                            toolCallId,
+                            parentToolCallId,
+                            'launcher_exit',
+                        ));
+                    }
+                    await messageQueue.flush();
+                }
                 messageQueue.destroy();
                 logger.debug('[remote]: message queue flushed');
 

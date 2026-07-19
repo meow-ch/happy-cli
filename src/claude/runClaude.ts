@@ -43,6 +43,27 @@ export interface StartOptions {
     jsRuntime?: JsRuntime
 }
 
+function hashClaudeMessageQueueMode(mode: EnhancedMode): string {
+    return hashObject({
+        isPlan: mode.permissionMode === 'plan',
+        model: mode.model,
+        fallbackModel: mode.fallbackModel,
+        customSystemPrompt: mode.customSystemPrompt,
+        appendSystemPrompt: mode.appendSystemPrompt,
+        allowedTools: mode.allowedTools,
+        disallowedTools: mode.disallowedTools,
+        terminalProtocol: mode.terminalProtocol,
+        // Only protocol-v1 prompts require one durable prompt per provider
+        // turn. Legacy prompts keep their historical same-mode batching even
+        // though canonical inbox delivery now injects a localKey.
+        ...(mode.terminalProtocol === 1
+            ? { promptLocalId: mode.promptLocalId }
+            : {}),
+    });
+}
+
+export const __testRunClaudeInternals = { hashClaudeMessageQueueMode };
+
 export async function runClaude(credentials: Credentials, options: StartOptions = {}): Promise<void> {
     logger.debug(`[CLAUDE] ===== CLAUDE MODE STARTING =====`);
     logger.debug(`[CLAUDE] This is the Claude agent, NOT Gemini`);
@@ -99,7 +120,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         // Initialize lifecycle state
         lifecycleState: 'running',
         lifecycleStateSince: Date.now(),
-        flavor: 'claude'
+        flavor: 'claude',
+        // The daemon uses this startup-webhook field as proof about this exact
+        // child process. It must never infer support from its own version.
+        terminalProtocol: 1,
     };
     const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
 
@@ -228,15 +252,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     }
 
     // Import MessageQueue2 and create message queue
-    const messageQueue = new MessageQueue2<EnhancedMode>(mode => hashObject({
-        isPlan: mode.permissionMode === 'plan',
-        model: mode.model,
-        fallbackModel: mode.fallbackModel,
-        customSystemPrompt: mode.customSystemPrompt,
-        appendSystemPrompt: mode.appendSystemPrompt,
-        allowedTools: mode.allowedTools,
-        disallowedTools: mode.disallowedTools
-    }));
+    const messageQueue = new MessageQueue2<EnhancedMode>(hashClaudeMessageQueueMode);
 
     // Forward messages to the queue
     // Permission modes: prefer provider-native claudePermissionMode; keep permissionMode as a legacy alias.
@@ -368,7 +384,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
-                disallowedTools: messageDisallowedTools
+                disallowedTools: messageDisallowedTools,
+                terminalProtocol: message.meta?.terminalProtocol,
+                promptLocalId: message.localKey,
             };
             messageQueue.pushIsolateAndClear(specialCommand.originalMessage || rawMessageText, enhancedMode);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
@@ -385,7 +403,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
-                disallowedTools: messageDisallowedTools
+                disallowedTools: messageDisallowedTools,
+                terminalProtocol: message.meta?.terminalProtocol,
+                promptLocalId: message.localKey,
             };
             messageQueue.pushIsolateAndClear(specialCommand.originalMessage || rawMessageText, enhancedMode);
             logger.debugLargeJson('[start] /compact command pushed to queue:', message);
@@ -402,7 +422,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
-                disallowedTools: messageDisallowedTools
+                disallowedTools: messageDisallowedTools,
+                terminalProtocol: message.meta?.terminalProtocol,
+                promptLocalId: message.localKey,
             };
             messageQueue.pushIsolateAndClear(specialCommand.originalMessage || rawMessageText, enhancedMode);
             logger.debugLargeJson('[start] /goal command pushed to queue:', message);
@@ -462,6 +484,8 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             appendSystemPrompt: messageAppendSystemPrompt,
             allowedTools: messageAllowedTools,
             disallowedTools: messageDisallowedTools,
+            terminalProtocol: message.meta?.terminalProtocol,
+            promptLocalId: message.localKey,
             images: messageImages
         };
 

@@ -43,10 +43,38 @@ export type ACPMessageData =
     // Terminal/command output
     | { type: 'terminal-output'; data: string; callId: string }
     // Task lifecycle events
-    | { type: 'task_started'; id: string }
-    | { type: 'task_complete'; id: string }
-    | { type: 'task_failed'; id: string; message: string; code?: string; param?: string; status?: number }
-    | { type: 'turn_aborted'; id: string }
+    | { type: 'task_started'; id: string; terminal_protocol?: 1 }
+    | {
+        type: 'task_complete';
+        id: string;
+        terminal_protocol?: 1;
+        subtype?: string;
+        reason?: string;
+        is_error?: false;
+        result?: string;
+      }
+    | {
+        type: 'task_failed';
+        id: string;
+        message: string;
+        code?: string;
+        param?: string;
+        status?: number;
+        terminal_protocol?: 1;
+        subtype?: string;
+        reason?: string;
+        is_error?: true;
+        result?: string;
+      }
+    | {
+        type: 'turn_aborted';
+        id: string;
+        terminal_protocol?: 1;
+        subtype?: string;
+        reason?: string;
+        is_error?: true;
+        result?: string;
+      }
     // Permissions
     | { type: 'permission-request'; permissionId: string; toolName: string; description: string; options?: unknown }
     // Usage/metrics
@@ -654,7 +682,15 @@ export class ApiSessionClient extends EventEmitter {
 
         const userResult = UserMessageSchema.safeParse(body);
         if (userResult.success) {
-            const resolvedUserMessage = await resolveUserMessageImageReferences(userResult.data);
+            // The server-side outbox id is the durable prompt identity. Older
+            // clients did not mirror it into the encrypted UserMessage, so
+            // inject it when localKey is absent and carry it through to the
+            // provider terminal. Preserve an explicit localKey for backwards
+            // compatibility with clients which already supplied one.
+            const correlatedUserMessage = !userResult.data.localKey && message.localId
+                ? { ...userResult.data, localKey: message.localId }
+                : userResult.data;
+            const resolvedUserMessage = await resolveUserMessageImageReferences(correlatedUserMessage);
             // Inbound work invalidates a previously reported safe-idle state
             // immediately. Without a forced report, the normal 30-second
             // heartbeat throttle can let daemon cleanup terminate a session

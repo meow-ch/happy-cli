@@ -141,12 +141,14 @@ export function startDaemonControlServer({
           agent: z.enum(['claude', 'codex', 'gemini']).optional(),
           environmentVariables: z.record(z.string(), z.string()).optional(),
           codexMcpServers: z.record(z.string(), z.unknown()).optional(),
-          codexUseBuiltInHappyMcp: z.boolean().optional()
+          codexUseBuiltInHappyMcp: z.boolean().optional(),
+          requiredTerminalProtocol: z.literal(1).optional(),
         }),
         response: {
           200: z.object({
             success: z.boolean(),
             sessionId: z.string().optional(),
+            terminalProtocol: z.literal(1).optional(),
             approvedNewDirectoryCreation: z.boolean().optional()
           }),
           409: z.object({
@@ -162,7 +164,15 @@ export function startDaemonControlServer({
         }
       }
     }, async (request, reply) => {
-      const { directory, sessionId, agent, environmentVariables, codexMcpServers, codexUseBuiltInHappyMcp } = request.body;
+      const {
+        directory,
+        sessionId,
+        agent,
+        environmentVariables,
+        codexMcpServers,
+        codexUseBuiltInHappyMcp,
+        requiredTerminalProtocol,
+      } = request.body;
 
       logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent || 'claude'}`);
       const result = await spawnSession({
@@ -172,6 +182,7 @@ export function startDaemonControlServer({
         environmentVariables,
         codexMcpServers,
         codexUseBuiltInHappyMcp,
+        requiredTerminalProtocol,
       });
 
       switch (result.type) {
@@ -187,6 +198,7 @@ export function startDaemonControlServer({
           return {
             success: true,
             sessionId: result.sessionId,
+            terminalProtocol: result.terminalProtocol,
             approvedNewDirectoryCreation: true
           };
         

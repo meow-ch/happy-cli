@@ -182,10 +182,12 @@ export interface SpawnSessionOptions {
     codexMcpServers?: Record<string, unknown>;
     codexUseBuiltInHappyMcp?: boolean;
     environmentVariables?: Record<string, string>;
+    /** Fail spawn unless the exact child session attests this terminal protocol. */
+    requiredTerminalProtocol?: 1;
 }
 
 export type SpawnSessionResult =
-    | { type: 'success'; sessionId: string }
+    | { type: 'success'; sessionId: string; terminalProtocol?: 1 }
     | { type: 'requestToApproveDirectoryCreation'; directory: string }
     | { type: 'error'; errorMessage: string };
 

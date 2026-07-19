@@ -21,4 +21,12 @@ export interface TrackedSession {
   tmuxSessionId?: string;
   /** Whether this daemon observed the spawn directly or re-adopted it from durable registry. */
   trackingSource?: 'memory' | 'registry';
+  /** Last explicit liveness/activity report from the session process. */
+  lastActivityAt?: number;
+  /** Agent-reported thinking state; undefined means cleanup is not safe. */
+  thinking?: boolean;
+  /** Durable session-message outbox depth; undefined means cleanup is not safe. */
+  pendingOutbox?: number;
+  /** Daemon receipt time for the latest explicit activity report. */
+  activityReportedAt?: number;
 }

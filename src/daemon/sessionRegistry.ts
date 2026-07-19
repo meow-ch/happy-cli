@@ -18,6 +18,10 @@ export interface PersistedDaemonSession {
   flavor?: string;
   startedAt: number;
   updatedAt: number;
+  lastActivityAt?: number;
+  thinking?: boolean;
+  pendingOutbox?: number;
+  activityReportedAt?: number;
 }
 
 interface PersistedDaemonSessionRegistry {
@@ -48,6 +52,18 @@ function normalizeSession(value: unknown): PersistedDaemonSession | null {
   };
   if (typeof value.path === 'string' && value.path.length > 0) session.path = value.path;
   if (typeof value.flavor === 'string' && value.flavor.length > 0) session.flavor = value.flavor;
+  if (typeof value.lastActivityAt === 'number' && Number.isFinite(value.lastActivityAt)) {
+    session.lastActivityAt = value.lastActivityAt;
+  }
+  if (typeof value.thinking === 'boolean') session.thinking = value.thinking;
+  if (typeof value.pendingOutbox === 'number'
+    && Number.isInteger(value.pendingOutbox)
+    && value.pendingOutbox >= 0) {
+    session.pendingOutbox = value.pendingOutbox;
+  }
+  if (typeof value.activityReportedAt === 'number' && Number.isFinite(value.activityReportedAt)) {
+    session.activityReportedAt = value.activityReportedAt;
+  }
   return session;
 }
 
@@ -97,6 +113,7 @@ export function upsertDaemonSessionRecord(
     .filter((session) => session.sessionId !== input.sessionId && session.pid !== input.pid);
   const existing = current
     .find((session) => session.sessionId === input.sessionId || session.pid === input.pid);
+  const sameProcess = existing?.pid === input.pid;
   const next: PersistedDaemonSession = {
     sessionId: input.sessionId,
     pid: input.pid,
@@ -104,6 +121,10 @@ export function upsertDaemonSessionRecord(
     startedAt: existing?.startedAt ?? now,
     updatedAt: now,
   };
+  if (sameProcess && existing?.lastActivityAt !== undefined) next.lastActivityAt = existing.lastActivityAt;
+  if (sameProcess && existing?.thinking !== undefined) next.thinking = existing.thinking;
+  if (sameProcess && existing?.pendingOutbox !== undefined) next.pendingOutbox = existing.pendingOutbox;
+  if (sameProcess && existing?.activityReportedAt !== undefined) next.activityReportedAt = existing.activityReportedAt;
   const path = input.metadata?.path ?? existing?.path;
   const flavor = input.metadata?.flavor ?? existing?.flavor;
   if (path) next.path = path;
@@ -111,6 +132,33 @@ export function upsertDaemonSessionRecord(
   sessions.push(next);
   writeDaemonSessionRegistry(sessions, registryPath);
   return next;
+}
+
+export function updateDaemonSessionActivity(
+  input: {
+    sessionId: string;
+    lastActivityAt: number;
+    thinking: boolean;
+    pendingOutbox: number;
+    reportedAt?: number;
+  },
+  registryPath = defaultDaemonSessionRegistryPath(),
+): PersistedDaemonSession | null {
+  const sessions = readDaemonSessionRegistry(registryPath);
+  const index = sessions.findIndex((session) => session.sessionId === input.sessionId);
+  if (index < 0) return null;
+  const current = sessions[index];
+  const updated: PersistedDaemonSession = {
+    ...current,
+    lastActivityAt: Math.max(current.lastActivityAt ?? 0, input.lastActivityAt),
+    thinking: input.thinking,
+    pendingOutbox: input.pendingOutbox,
+    activityReportedAt: input.reportedAt ?? Date.now(),
+    updatedAt: Date.now(),
+  };
+  sessions[index] = updated;
+  writeDaemonSessionRegistry(sessions, registryPath);
+  return updated;
 }
 
 export function removeDaemonSessionRecord(

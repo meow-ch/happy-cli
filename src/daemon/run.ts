@@ -33,9 +33,15 @@ import {
   pidIsAlive,
   pruneDeadDaemonSessionRecords,
   removeDaemonSessionRecord,
+  updateDaemonSessionActivity,
   upsertDaemonSessionRecord,
 } from './sessionRegistry';
 import { waitForSessionWebhook } from './sessionWebhookAwaiter';
+import { replayPendingSessionOutboxes } from '@/api/sessionMessageOutboxReplay';
+import {
+  daemonSessionLifecyclePolicyFromEnvironment,
+  selectDaemonSessionsForExpiry,
+} from './sessionLifecycle';
 
 const SESSION_WEBHOOK_TIMEOUT_MS = 15_000;
 
@@ -224,6 +230,7 @@ export async function startDaemon(): Promise<void> {
 
     // Setup state - key by PID
     const pidToTrackedSession = new Map<number, TrackedSession>();
+    const sessionLifecyclePolicy = daemonSessionLifecyclePolicyFromEnvironment();
 
     // Session spawning awaiter system
     const pidToAwaiter = new Map<number, (session: TrackedSession) => void>();
@@ -255,11 +262,26 @@ export async function startDaemon(): Promise<void> {
           continue;
         }
 
+        const ownershipMatches = record.startedBy === 'daemon'
+          ? proc.type === 'daemon-spawned-session' || proc.type === 'dev-daemon-spawned'
+          : proc.type === 'user-session' || proc.type === 'dev-session';
+        if (!ownershipMatches) {
+          // PID reuse or a stale/malformed registry entry. Never adopt a
+          // process whose command-line ownership disagrees with the record.
+          removeDaemonSessionRecord({ sessionId: record.sessionId, pid: record.pid });
+          logger.debug(`[DAEMON RUN] Refused unsafe session re-adoption for ${record.sessionId} PID ${record.pid}`);
+          continue;
+        }
+
         pidToTrackedSession.set(record.pid, {
           startedBy: record.startedBy,
           happySessionId: record.sessionId,
           pid: record.pid,
           trackingSource: 'registry',
+          lastActivityAt: record.lastActivityAt,
+          thinking: record.thinking,
+          pendingOutbox: record.pendingOutbox,
+          activityReportedAt: record.activityReportedAt,
         });
         logger.debug(`[DAEMON RUN] Re-adopted session ${record.sessionId} from registry PID ${record.pid}`);
       }
@@ -300,12 +322,16 @@ export async function startDaemon(): Promise<void> {
         existingSession.happySessionId = sessionId;
         existingSession.happySessionMetadataFromLocalWebhook = sessionMetadata;
         existingSession.trackingSource = existingSession.trackingSource ?? 'memory';
-        upsertDaemonSessionRecord({
+        const persisted = upsertDaemonSessionRecord({
           sessionId,
           pid,
           startedBy: existingSession.startedBy,
           metadata: sessionMetadata,
         });
+        existingSession.lastActivityAt = persisted.lastActivityAt;
+        existingSession.thinking = persisted.thinking;
+        existingSession.pendingOutbox = persisted.pendingOutbox;
+        existingSession.activityReportedAt = persisted.activityReportedAt;
         logger.debug(`[DAEMON RUN] Updated daemon-spawned session ${sessionId} with metadata`);
 
         // Resolve any awaiter for this PID
@@ -323,6 +349,9 @@ export async function startDaemon(): Promise<void> {
           happySessionMetadataFromLocalWebhook: sessionMetadata,
           pid,
           trackingSource: 'memory',
+          lastActivityAt: Date.now(),
+          thinking: false,
+          pendingOutbox: 0,
         };
         pidToTrackedSession.set(pid, trackedSession);
         upsertDaemonSessionRecord({
@@ -333,6 +362,32 @@ export async function startDaemon(): Promise<void> {
         });
         logger.debug(`[DAEMON RUN] Registered externally-started session ${sessionId}`);
       }
+    };
+
+    const onHappySessionActivity = (activity: {
+      sessionId: string;
+      lastActivityAt: number;
+      thinking: boolean;
+      pendingOutbox: number;
+    }) => {
+      for (const session of pidToTrackedSession.values()) {
+        if (session.happySessionId !== activity.sessionId) continue;
+        const activityReportedAt = Date.now();
+        const lastActivityAt = Math.min(Date.now(), Math.max(0, activity.lastActivityAt));
+        session.lastActivityAt = Math.max(session.lastActivityAt ?? 0, lastActivityAt);
+        session.thinking = activity.thinking;
+        session.pendingOutbox = activity.pendingOutbox;
+        session.activityReportedAt = activityReportedAt;
+        updateDaemonSessionActivity({
+          sessionId: activity.sessionId,
+          lastActivityAt: session.lastActivityAt,
+          thinking: activity.thinking,
+          pendingOutbox: activity.pendingOutbox,
+          reportedAt: activityReportedAt,
+        });
+        return;
+      }
+      logger.debug(`[DAEMON RUN] Ignoring activity for untracked session ${activity.sessionId}`);
     };
 
     // Spawn a new session (sessionId reserved for future --resume functionality)
@@ -814,7 +869,8 @@ export async function startDaemon(): Promise<void> {
       stopSession,
       spawnSession,
       requestShutdown: () => requestShutdown('happy-cli'),
-      onHappySessionWebhook
+      onHappySessionWebhook,
+      onHappySessionActivity,
     });
 
     // Write initial daemon state (no lock needed for state file)
@@ -861,6 +917,37 @@ export async function startDaemon(): Promise<void> {
     // Connect to server
     apiMachine.connect();
 
+    let outboxReplayRunning = false;
+    const replayOrphanedSessionOutboxes = async () => {
+      if (outboxReplayRunning) return;
+      outboxReplayRunning = true;
+      try {
+        const activeSessionIds = new Set(
+          Array.from(pidToTrackedSession.values())
+            .map((session) => session.happySessionId)
+            .filter((sessionId): sessionId is string => Boolean(sessionId)),
+        );
+        const result = await replayPendingSessionOutboxes(credentials.token, {
+          excludeSessionIds: activeSessionIds,
+          limit: 2,
+        });
+        if (result.attemptedSessions > 0) {
+          logger.debug('[DAEMON RUN] Orphaned outbox replay pass completed', result);
+        }
+      } catch (error) {
+        logger.debug('[DAEMON RUN] Orphaned outbox replay pass failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        outboxReplayRunning = false;
+      }
+    };
+    const initialOutboxReplay = setTimeout(
+      () => void replayOrphanedSessionOutboxes(),
+      Math.floor(Math.random() * 5_001),
+    );
+    initialOutboxReplay.unref?.();
+
     // Every 60 seconds:
     // 1. Prune stale sessions
     // 2. Check if daemon needs update
@@ -890,6 +977,17 @@ export async function startDaemon(): Promise<void> {
           removeDaemonSessionRecord({ pid });
         }
       }
+
+      const expiryDecisions = selectDaemonSessionsForExpiry(
+        Array.from(pidToTrackedSession.values()),
+        Date.now(),
+        sessionLifecyclePolicy,
+      );
+      for (const decision of expiryDecisions) {
+        logger.debug(`[DAEMON RUN] Expiring safe idle daemon session PID ${decision.pid} (${decision.reason})`);
+        stopSession(`PID-${decision.pid}`);
+      }
+      void replayOrphanedSessionOutboxes();
 
       // Check if daemon needs update
       // If version on disk is different from the one in package.json - we need to restart
@@ -967,6 +1065,7 @@ export async function startDaemon(): Promise<void> {
         clearInterval(restartOnStaleVersionAndHeartbeat);
         logger.debug('[DAEMON RUN] Health check interval cleared');
       }
+      clearTimeout(initialOutboxReplay);
 
       // Update daemon state before shutting down
       await apiMachine.updateDaemonState((state: DaemonState | null) => ({

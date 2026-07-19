@@ -107,7 +107,7 @@ export type Update = z.infer<typeof UpdateSchema>
  */
 export interface ServerToClientEvents {
   update: (data: Update) => void
-  'rpc-request': (data: { method: string, params: string }, callback: (response: string) => void) => void
+  'rpc-request': (data: { callId?: string, method: string, params: string }, callback: (response: string) => void) => void
   'rpc-registered': (data: { method: string }) => void
   'rpc-unregistered': (data: { method: string }) => void
   'rpc-error': (data: { type: string, error: string }) => void
@@ -121,14 +121,26 @@ export interface ServerToClientEvents {
  * Socket events from client to server
  */
 export interface ClientToServerEvents {
-  message: (data: { sid: string, message: any }) => void
+  message: (data: {
+    sid: string;
+    message: string;
+    /** Stable producer idempotency key for durable message delivery. */
+    localId?: string;
+  }, callback?: (answer: SessionMessageAck) => void) => void
   'session-alive': (data: {
     sid: string;
     time: number;
     thinking: boolean;
     mode?: 'local' | 'remote';
   }) => void
-  'session-end': (data: { sid: string, time: number }) => void,
+  'session-end': (data: {
+    sid: string;
+    time: number;
+    /** Stable correlation key for durable, retryable session termination. */
+    localId?: string;
+    /** Runtime incarnation that created the durable end marker. */
+    sessionInstanceId?: string;
+  }, callback?: (answer: SessionEndAck) => void) => void,
   'update-metadata': (data: { sid: string, expectedVersion: number, metadata: string }, cb: (answer: {
     result: 'error'
   } | {
@@ -154,10 +166,12 @@ export interface ClientToServerEvents {
   'ping': (callback: () => void) => void
   'rpc-register': (data: { method: string }) => void
   'rpc-unregister': (data: { method: string }) => void
-  'rpc-call': (data: { method: string, params: string }, callback: (response: {
+  'rpc-call': (data: { callId?: string, method: string, params: string }, callback: (response: {
     ok: boolean
+    callId?: string
     result?: string
     error?: string
+    outcome?: 'unknown'
   }) => void) => void
   'usage-report': (data: {
     key: string
@@ -172,6 +186,41 @@ export interface ClientToServerEvents {
     }
   }) => void
 }
+
+export const SessionMessageAckSchema = z.discriminatedUnion('result', [
+  z.object({
+    result: z.literal('success'),
+    duplicate: z.boolean(),
+    message: z.object({
+      id: z.string(),
+      seq: z.number(),
+      localId: z.string(),
+      createdAt: z.number(),
+      updatedAt: z.number(),
+    }),
+  }),
+  z.object({
+    result: z.literal('error'),
+    code: z.string(),
+    retryable: z.boolean(),
+  }),
+]);
+
+export type SessionMessageAck = z.infer<typeof SessionMessageAckSchema>
+
+export const SessionEndAckSchema = z.discriminatedUnion('result', [
+  z.object({
+    result: z.literal('success'),
+    localId: z.string(),
+  }),
+  z.object({
+    result: z.literal('error'),
+    code: z.string(),
+    retryable: z.boolean(),
+  }),
+]);
+
+export type SessionEndAck = z.infer<typeof SessionEndAckSchema>
 
 /**
  * Session information
@@ -242,11 +291,20 @@ export const SessionMessageSchema = z.object({
   content: SessionMessageContentSchema,
   createdAt: z.number(),
   id: z.string(),
-  seq: z.number(),
+  localId: z.string().nullable().optional(),
+  seq: z.number().int().nonnegative(),
   updatedAt: z.number()
 })
 
 export type SessionMessage = z.infer<typeof SessionMessageSchema>
+
+export const SessionMessageReplayPageSchema = z.object({
+  messages: z.array(SessionMessageSchema),
+  hasMore: z.boolean(),
+  nextAfterSeq: z.number().int().nonnegative(),
+})
+
+export type SessionMessageReplayPage = z.infer<typeof SessionMessageReplayPageSchema>
 
 /**
  * Message metadata schema

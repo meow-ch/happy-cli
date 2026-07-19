@@ -372,6 +372,28 @@ RPC is used to send commands over the Socket.IO connection:
 
 This mechanism allows the server and mobile clients to drive local actions without exposing a broad REST surface.
 
+Session message notifications are wake-ups rather than an inbox. A session
+client starts from the `Session.seq` snapshot, reconciles the authenticated
+`messages?afterSeq=` endpoint on connect and every wake-up, and polls it while
+connected. Rows are handed to the local user/control queue in session-sequence
+order before the cursor advances; agent history and locally-produced rows are
+not re-executed.
+
+### RPC retry safety
+
+- New RPC callers attach a stable UUID `callId`. The daemon and session clients
+  fingerprint the method plus a deterministic digest of the decrypted params.
+- A pending reservation is fsynced under `happyHomeDir/rpc-result-ledger` before
+  the handler runs. Concurrent duplicates join, completed duplicates receive the
+  exact stored ciphertext, and conflicting reuse fails closed.
+- Completed results are retained for at least 24 hours. Capacity pressure never
+  evicts a younger result; new calls fail closed until an eligible old result can
+  be pruned. The ledger is also bounded by entry count, total bytes, and result size.
+- A malformed lock, a live lock which cannot be acquired, or a pending record
+  whose executor died is an unknown outcome. The CLI does not re-run the handler.
+- Requests without `callId` retain legacy behavior during rolling upgrades and
+  do not receive the at-most-once guarantee.
+
 ## Implementation references
 - CLI entry: `packages/happy-cli/src/index.ts`
 - Daemon: `packages/happy-cli/src/daemon`

@@ -20,6 +20,7 @@ export type RpcHandlerMap = Map<string, RpcHandler>;
  * RPC request data from server
  */
 export interface RpcRequest {
+    callId?: string;
     method: string;
     params: string; // Base64 encoded encrypted params
 }
@@ -37,6 +38,7 @@ export interface RpcHandlerConfig {
     encryptionKey: Uint8Array;
     encryptionVariant: 'legacy' | 'dataKey';
     logger?: (message: string, data?: any) => void;
+    resultLedger?: import('./RpcResultLedger').RpcResultLedger;
 }
 
 /**

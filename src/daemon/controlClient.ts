@@ -81,6 +81,13 @@ export async function notifyDaemonSessionStarted(
   });
 }
 
+export async function notifyDaemonSessionActivity(
+  sessionId: string,
+  activity: { lastActivityAt: number; thinking: boolean; pendingOutbox: number },
+): Promise<{ error?: string } | any> {
+  return await daemonPost('/session-activity', { sessionId, ...activity });
+}
+
 export async function listDaemonSessions(): Promise<any[]> {
   const result = await daemonPost('/list');
   return result.children || [];

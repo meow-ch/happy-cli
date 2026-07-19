@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   readDaemonSessionRegistry,
   removeDaemonSessionRecord,
+  updateDaemonSessionActivity,
   upsertDaemonSessionRecord,
   writeDaemonSessionRegistry,
 } from './sessionRegistry';
@@ -95,5 +96,63 @@ describe('daemon session registry', () => {
 
     removeDaemonSessionRecord({ pid: 456 }, path);
     expect(readDaemonSessionRegistry(path)).toEqual([]);
+  });
+
+  it('persists thinking, activity, and durable outbox depth', () => {
+    const path = registryPath();
+    upsertDaemonSessionRecord({
+      sessionId: 'sid_activity',
+      pid: 789,
+      startedBy: 'daemon',
+    }, path);
+
+    const updated = updateDaemonSessionActivity({
+      sessionId: 'sid_activity',
+      lastActivityAt: 1234,
+      thinking: true,
+      pendingOutbox: 3,
+      reportedAt: 5678,
+    }, path);
+
+    expect(updated).toEqual(expect.objectContaining({
+      lastActivityAt: expect.any(Number),
+      thinking: true,
+      pendingOutbox: 3,
+      activityReportedAt: 5678,
+    }));
+    expect(readDaemonSessionRegistry(path)[0]).toEqual(expect.objectContaining({
+      thinking: true,
+      pendingOutbox: 3,
+      activityReportedAt: 5678,
+    }));
+  });
+
+  it('keeps safety state unknown until an explicit report and resets it for a new pid', () => {
+    const path = registryPath();
+    const initial = upsertDaemonSessionRecord({
+      sessionId: 'sid_unknown',
+      pid: 101,
+      startedBy: 'daemon',
+    }, path);
+    expect(initial).not.toHaveProperty('lastActivityAt');
+    expect(initial).not.toHaveProperty('thinking');
+    expect(initial).not.toHaveProperty('pendingOutbox');
+    expect(initial).not.toHaveProperty('activityReportedAt');
+
+    updateDaemonSessionActivity({
+      sessionId: 'sid_unknown',
+      lastActivityAt: 100,
+      thinking: false,
+      pendingOutbox: 0,
+      reportedAt: 200,
+    }, path);
+    const replacement = upsertDaemonSessionRecord({
+      sessionId: 'sid_unknown',
+      pid: 202,
+      startedBy: 'daemon',
+    }, path);
+    expect(replacement).not.toHaveProperty('thinking');
+    expect(replacement).not.toHaveProperty('pendingOutbox');
+    expect(replacement).not.toHaveProperty('activityReportedAt');
   });
 });

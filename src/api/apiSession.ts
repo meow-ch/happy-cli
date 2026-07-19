@@ -1,7 +1,8 @@
 import { logger } from '@/ui/logger'
 import { EventEmitter } from 'node:events'
 import { io, Socket } from 'socket.io-client'
-import { AgentState, ClientToServerEvents, MessageContent, Metadata, PermissionMode, ServerToClientEvents, Session, Update, UserMessage, UserMessageSchema, Usage } from './types'
+import axios from 'axios';
+import { AgentState, ClientToServerEvents, MessageContent, Metadata, PermissionMode, ServerToClientEvents, Session, SessionEndAckSchema, SessionMessage, SessionMessageAckSchema, SessionMessageReplayPage, SessionMessageReplayPageSchema, Update, UserMessage, UserMessageSchema, Usage } from './types'
 import { decodeBase64, decrypt, encodeBase64, encrypt } from './encryption';
 import { backoff } from '@/utils/time';
 import { configuration } from '@/configuration';
@@ -12,6 +13,9 @@ import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers';
 import { calculateCost } from '@/utils/pricing';
 import { resolveUserMessageImageReferences } from './imageReferences';
+import { SessionEndOutboxRecord, SessionMessageOutbox, SessionMessageOutboxOptions, SessionMessageOutboxRecord } from './sessionMessageOutbox';
+import { notifyDaemonSessionActivity } from '@/daemon/controlClient';
+import { SessionMessageInbox } from './sessionMessageInbox';
 
 /**
  * ACP (Agent Communication Protocol) message data types.
@@ -50,6 +54,19 @@ export type ACPMessageData =
 
 export type ACPProvider = 'gemini' | 'codex' | 'claude' | 'opencode';
 
+export interface ApiSessionClientOptions {
+    outbox?: SessionMessageOutboxOptions;
+    messageAckTimeoutMs?: number;
+    outboxRetryBaseMs?: number;
+    outboxRetryMaxMs?: number;
+    inbox?: {
+        fetchPage?: (afterSeq: number) => Promise<SessionMessageReplayPage>;
+        reconcileIntervalMs?: number;
+        retryBaseMs?: number;
+        retryMaxMs?: number;
+    };
+}
+
 export class ApiSessionClient extends EventEmitter {
     private readonly token: string;
     readonly sessionId: string;
@@ -59,14 +76,40 @@ export class ApiSessionClient extends EventEmitter {
     private agentStateVersion: number;
     private socket: Socket<ServerToClientEvents, ClientToServerEvents>;
     private pendingMessages: UserMessage[] = [];
-    private pendingMessageCallback: ((message: UserMessage) => void) | null = null;
+    private pendingControlMessages: unknown[] = [];
+    private pendingMessageCallback: ((message: UserMessage) => void | Promise<void>) | null = null;
     readonly rpcHandlerManager: RpcHandlerManager;
     private agentStateLock = new AsyncLock();
     private metadataLock = new AsyncLock();
+    private daemonActivityReportLock = new AsyncLock();
     private encryptionKey: Uint8Array;
     private encryptionVariant: 'legacy' | 'dataKey';
+    private readonly outbox: SessionMessageOutbox;
+    private readonly messageAckTimeoutMs: number;
+    private readonly outboxRetryBaseMs: number;
+    private readonly outboxRetryMaxMs: number;
+    private readonly sessionInstanceId = randomUUID();
+    private outboxDrainPromise: Promise<void> | null = null;
+    private outboxRetryTimer: NodeJS.Timeout | null = null;
+    private outboxRetryAttempt = 0;
+    private outboxBlockedByPermanentError = false;
+    private closed = false;
+    private currentThinking = false;
+    private currentLastActivityAt = Date.now();
+    private lastDaemonActivityReportAt = 0;
+    private lastReportedThinking: boolean | null = null;
+    private lastReportedPendingOutbox: number | null = null;
+    private readonly inbox: SessionMessageInbox;
+    private readonly inboxReconcileIntervalMs: number;
+    private readonly inboxRetryBaseMs: number;
+    private readonly inboxRetryMaxMs: number;
+    private inboxReconcilePromise: Promise<void> | null = null;
+    private inboxRetryTimer: NodeJS.Timeout | null = null;
+    private inboxPeriodicTimer: NodeJS.Timeout | null = null;
+    private inboxRetryAttempt = 0;
+    private readonly ownMessageCiphertextByLocalId = new Map<string, string>();
 
-    constructor(token: string, session: Session) {
+    constructor(token: string, session: Session, options: ApiSessionClientOptions = {}) {
         super()
         this.token = token;
         this.sessionId = session.id;
@@ -76,6 +119,36 @@ export class ApiSessionClient extends EventEmitter {
         this.agentStateVersion = session.agentStateVersion;
         this.encryptionKey = session.encryptionKey;
         this.encryptionVariant = session.encryptionVariant;
+        this.outbox = new SessionMessageOutbox(session.id, options.outbox);
+        this.outboxBlockedByPermanentError = this.outbox.hasBarrier;
+        this.messageAckTimeoutMs = options.messageAckTimeoutMs
+            ?? Number(process.env.HAPPY_MESSAGE_ACK_TIMEOUT_MS || 15_000);
+        this.outboxRetryBaseMs = options.outboxRetryBaseMs ?? 1_000;
+        this.outboxRetryMaxMs = options.outboxRetryMaxMs ?? 60_000;
+        for (const record of this.outbox.pendingRecords()) {
+            this.ownMessageCiphertextByLocalId.set(record.localId, record.message);
+        }
+        const fetchPage = options.inbox?.fetchPage ?? (async (afterSeq: number) => {
+            const response = await axios.get(
+                `${configuration.serverUrl}/v1/sessions/${encodeURIComponent(this.sessionId)}/messages`,
+                {
+                    headers: { Authorization: `Bearer ${this.token}` },
+                    params: { afterSeq, limit: 500 },
+                    timeout: 30_000,
+                },
+            );
+            const parsed = SessionMessageReplayPageSchema.safeParse(response.data);
+            if (!parsed.success) throw new Error('Invalid session message replay response');
+            return parsed.data;
+        });
+        this.inbox = new SessionMessageInbox({
+            initialAfterSeq: session.seq,
+            fetchPage,
+            deliver: (message) => this.deliverStoredSessionMessage(message),
+        });
+        this.inboxReconcileIntervalMs = options.inbox?.reconcileIntervalMs ?? 3_000;
+        this.inboxRetryBaseMs = options.inbox?.retryBaseMs ?? 1_000;
+        this.inboxRetryMaxMs = options.inbox?.retryMaxMs ?? 30_000;
 
         // Initialize RPC handler manager
         this.rpcHandlerManager = new RpcHandlerManager({
@@ -94,13 +167,15 @@ export class ApiSessionClient extends EventEmitter {
             auth: {
                 token: this.token,
                 clientType: 'session-scoped' as const,
-                sessionId: this.sessionId
+                sessionId: this.sessionId,
+                sessionInstanceId: this.sessionInstanceId,
             },
             path: '/v1/updates',
             reconnection: true,
             reconnectionAttempts: Infinity,
             reconnectionDelay: 1000,
-            reconnectionDelayMax: 5000,
+            reconnectionDelayMax: 60000,
+            randomizationFactor: 1,
             transports: ['websocket'],
             withCredentials: true,
             autoConnect: false
@@ -113,21 +188,31 @@ export class ApiSessionClient extends EventEmitter {
         this.socket.on('connect', () => {
             logger.debug('Socket connected successfully');
             this.rpcHandlerManager.onSocketConnect(this.socket);
+            this.outboxRetryAttempt = 0;
+            if (this.outboxRetryTimer) {
+                clearTimeout(this.outboxRetryTimer);
+                this.outboxRetryTimer = null;
+            }
+            this.scheduleOutboxDrain(0);
+            this.startInboxPeriodicReconciliation();
+            this.scheduleInboxReconciliation(0);
         })
 
         // Set up global RPC request handler
-        this.socket.on('rpc-request', async (data: { method: string, params: string }, callback: (response: string) => void) => {
+        this.socket.on('rpc-request', async (data: { callId?: string, method: string, params: string }, callback: (response: string) => void) => {
             callback(await this.rpcHandlerManager.handleRequest(data));
         })
 
         this.socket.on('disconnect', (reason) => {
             logger.debug('[API] Socket disconnected:', reason);
             this.rpcHandlerManager.onSocketDisconnect();
+            this.stopInboxReconciliationTimers();
         })
 
         this.socket.on('connect_error', (error) => {
             logger.debug('[API] Socket connection error:', error);
             this.rpcHandlerManager.onSocketDisconnect();
+            this.stopInboxReconciliationTimers();
         })
 
         // Server events
@@ -140,38 +225,11 @@ export class ApiSessionClient extends EventEmitter {
                     return;
                 }
 
-                if (data.body.t === 'new-message' && data.body.message.content.t === 'encrypted') {
-                    const body = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.message.content.c));
-
-                    logger.debug(`[SOCKET] 🖼️ DECRYPTED MESSAGE - Content type: ${body?.content?.type}`);
-                    if (body?.content?.type === 'multipart') {
-                        const parts = body.content.parts || [];
-                        logger.debug(`[SOCKET] 🖼️ MULTIPART MESSAGE - ${parts.length} parts: ${parts.map((p: any) => p.type).join(', ')}`);
-                        const imageParts = parts.filter((p: any) => p.type === 'image');
-                        if (imageParts.length > 0) {
-                            const firstSource = imageParts[0]?.source;
-                            logger.debug(`[SOCKET] 🖼️ IMAGE FOUND - ${imageParts.length} images, first source: ${firstSource?.type || 'unknown'}`);
-                        }
-                    }
-                    logger.debugLargeJson('[SOCKET] [UPDATE] Received update:', body)
-
-                    // Try to parse as user message first
-                    const userResult = UserMessageSchema.safeParse(body);
-                    if (userResult.success) {
-                        const resolvedUserMessage = await resolveUserMessageImageReferences(userResult.data);
-                        // Server already filtered to only our session
-                        logger.debug(`[SOCKET] ✅ Parsed user message successfully. Content type: ${resolvedUserMessage.content?.type}`);
-                        if (this.pendingMessageCallback) {
-                            this.pendingMessageCallback(resolvedUserMessage);
-                        } else {
-                            this.pendingMessages.push(resolvedUserMessage);
-                        }
-                    } else {
-                        // If not a user message, it might be a permission response or other message type
-                        logger.debug(`[SOCKET] Failed to parse as user message: ${JSON.stringify(userResult.error.errors)}`);
-                        logger.debugLargeJson('[SOCKET] Message body that failed parsing:', body);
-                        this.emit('message', body);
-                    }
+                if (data.body.t === 'new-message') {
+                    // Socket delivery is only a wake-up. Reading the canonical
+                    // cursor endpoint heals disconnects, Redis loss, duplicates,
+                    // and out-of-order at-least-once notifications.
+                    if (data.body.sid === this.sessionId) this.scheduleInboxReconciliation(0);
                 } else if (data.body.t === 'update-session') {
                     if (data.body.metadata && data.body.metadata.version > this.metadataVersion) {
                         this.metadata = decrypt(this.encryptionKey, this.encryptionVariant, decodeBase64(data.body.metadata.value));
@@ -205,10 +263,30 @@ export class ApiSessionClient extends EventEmitter {
         this.socket.connect();
     }
 
-    onUserMessage(callback: (data: UserMessage) => void) {
+    get pendingOutboxCount(): number {
+        return this.outbox.pendingCount;
+    }
+
+    get quarantinedOutboxCount(): number {
+        return this.outbox.quarantinedCount;
+    }
+
+    get inboundAfterSeq(): number {
+        return this.inbox.afterSeq;
+    }
+
+    override on(eventName: string | symbol, listener: (...args: any[]) => void): this {
+        super.on(eventName, listener);
+        if (eventName === 'message') this.drainPendingControlMessages();
+        return this;
+    }
+
+    onUserMessage(callback: (data: UserMessage) => void | Promise<void>) {
         this.pendingMessageCallback = callback;
         while (this.pendingMessages.length > 0) {
-            callback(this.pendingMessages.shift()!);
+            void Promise.resolve(callback(this.pendingMessages.shift()!)).catch((error) => {
+                logger.debug('[INBOX] Pending user message callback failed', { error });
+            });
         }
     }
 
@@ -247,17 +325,8 @@ export class ApiSessionClient extends EventEmitter {
 
         logger.debugLargeJson('[SOCKET] Sending message through socket:', content)
 
-        // Check if socket is connected before sending
-        if (!this.socket.connected) {
-            logger.debug('[API] Socket not connected, cannot send Claude session message. Message will be lost:', { type: body.type });
-            return;
-        }
-
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
-        this.socket.emit('message', {
-            sid: this.sessionId,
-            message: encrypted
-        });
+        this.enqueueEncryptedMessage(encrypted);
 
         // Track usage from assistant messages
         if (body.type === 'assistant' && body.message?.usage) {
@@ -293,16 +362,7 @@ export class ApiSessionClient extends EventEmitter {
         };
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
 
-        // Check if socket is connected before sending
-        if (!this.socket.connected) {
-            logger.debug('[API] Socket not connected, cannot send message. Message will be lost:', { type: body.type });
-            // TODO: Consider implementing message queue or HTTP fallback for reliability
-        }
-
-        this.socket.emit('message', {
-            sid: this.sessionId,
-            message: encrypted
-        });
+        this.enqueueEncryptedMessage(encrypted);
     }
 
     /**
@@ -328,10 +388,7 @@ export class ApiSessionClient extends EventEmitter {
         logger.debug(`[SOCKET] Sending ACP message from ${provider}:`, { type: body.type, hasMessage: 'message' in body });
 
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
-        this.socket.emit('message', {
-            sid: this.sessionId,
-            message: encrypted
-        });
+        this.enqueueEncryptedMessage(encrypted);
     }
 
     sendSessionEvent(event: {
@@ -352,16 +409,15 @@ export class ApiSessionClient extends EventEmitter {
             }
         };
         const encrypted = encodeBase64(encrypt(this.encryptionKey, this.encryptionVariant, content));
-        this.socket.emit('message', {
-            sid: this.sessionId,
-            message: encrypted
-        });
+        this.enqueueEncryptedMessage(encrypted);
     }
 
     /**
      * Send a ping message to keep the connection alive
      */
     keepAlive(thinking: boolean, mode: 'local' | 'remote') {
+        if (thinking !== this.currentThinking) this.currentLastActivityAt = Date.now();
+        this.currentThinking = thinking;
         if (process.env.DEBUG) { // too verbose for production
             logger.debug(`[API] Sending keep alive message: ${thinking}`);
         }
@@ -371,13 +427,19 @@ export class ApiSessionClient extends EventEmitter {
             thinking,
             mode
         });
+        void this.reportDaemonActivity();
     }
 
     /**
      * Send session death message
      */
     sendSessionDeath() {
-        this.socket.emit('session-end', { sid: this.sessionId, time: Date.now() });
+        // Session-end is itself durable. The drain commits all messages already
+        // present in this ordered outbox before it sends an end marker.
+        this.currentLastActivityAt = Date.now();
+        this.outbox.enqueueSessionEnd(this.sessionInstanceId);
+        void this.reportDaemonActivity();
+        this.scheduleOutboxDrain(0);
     }
 
     /**
@@ -467,21 +529,348 @@ export class ApiSessionClient extends EventEmitter {
      * Wait for socket buffer to flush
      */
     async flush(): Promise<void> {
-        if (!this.socket.connected) {
-            return;
+        if (!this.socket.connected) return;
+        if (this.outboxRetryTimer) {
+            clearTimeout(this.outboxRetryTimer);
+            this.outboxRetryTimer = null;
         }
-        return new Promise((resolve) => {
+        this.scheduleOutboxDrain(0);
+        const drain = this.outboxDrainPromise ?? Promise.resolve();
+        let drainTimeout: NodeJS.Timeout | null = null;
+        try {
+            await Promise.race([
+                drain,
+                new Promise<void>((resolve) => {
+                    drainTimeout = setTimeout(resolve, 10_000);
+                }),
+            ]);
+        } finally {
+            if (drainTimeout) clearTimeout(drainTimeout);
+        }
+        if (!this.socket.connected || this.outbox.pendingCount > 0) return;
+        await new Promise<void>((resolve) => {
+            const timeout = setTimeout(resolve, 10_000);
             this.socket.emit('ping', () => {
+                clearTimeout(timeout);
                 resolve();
             });
-            setTimeout(() => {
-                resolve();
-            }, 10000);
         });
     }
 
     async close() {
         logger.debug('[API] socket.close() called');
+        this.closed = true;
+        if (this.outboxRetryTimer) clearTimeout(this.outboxRetryTimer);
+        this.stopInboxReconciliationTimers();
         this.socket.close();
+    }
+
+    private startInboxPeriodicReconciliation(): void {
+        if (this.inboxPeriodicTimer || this.inboxReconcileIntervalMs <= 0) return;
+        this.inboxPeriodicTimer = setInterval(() => {
+            this.scheduleInboxReconciliation(0);
+        }, this.inboxReconcileIntervalMs);
+        this.inboxPeriodicTimer.unref?.();
+    }
+
+    private stopInboxReconciliationTimers(): void {
+        if (this.inboxRetryTimer) clearTimeout(this.inboxRetryTimer);
+        if (this.inboxPeriodicTimer) clearInterval(this.inboxPeriodicTimer);
+        this.inboxRetryTimer = null;
+        this.inboxPeriodicTimer = null;
+    }
+
+    private scheduleInboxReconciliation(delayMs: number): void {
+        if (this.closed || !this.socket.connected) return;
+        if (delayMs === 0 && this.inboxRetryTimer) {
+            clearTimeout(this.inboxRetryTimer);
+            this.inboxRetryTimer = null;
+        }
+        if (this.inboxReconcilePromise) {
+            // Mark another pass requested; SessionMessageInbox coalesces it into
+            // the existing serialized worker.
+            void this.inbox.reconcile();
+            return;
+        }
+        if (this.inboxRetryTimer) return;
+        if (delayMs > 0) {
+            this.inboxRetryTimer = setTimeout(() => {
+                this.inboxRetryTimer = null;
+                this.scheduleInboxReconciliation(0);
+            }, delayMs);
+            this.inboxRetryTimer.unref?.();
+            return;
+        }
+
+        const work = this.inbox.reconcile();
+        this.inboxReconcilePromise = work;
+        let retryDelay: number | null = null;
+        void work.then(() => {
+            this.inboxRetryAttempt = 0;
+        }, (error) => {
+            const ceiling = Math.min(
+                this.inboxRetryMaxMs,
+                this.inboxRetryBaseMs * (2 ** Math.min(this.inboxRetryAttempt++, 16)),
+            );
+            retryDelay = Math.floor(Math.random() * (ceiling + 1));
+            logger.debug('[INBOX] Canonical session message reconciliation paused', {
+                sessionId: this.sessionId,
+                afterSeq: this.inbox.afterSeq,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }).finally(() => {
+            if (this.inboxReconcilePromise === work) this.inboxReconcilePromise = null;
+            if (retryDelay !== null && !this.closed && this.socket.connected) {
+                this.scheduleInboxReconciliation(retryDelay);
+            }
+        });
+    }
+
+    private async deliverStoredSessionMessage(message: SessionMessage): Promise<void> {
+        const ownCiphertext = message.localId
+            ? this.ownMessageCiphertextByLocalId.get(message.localId)
+            : undefined;
+        if (message.localId && ownCiphertext !== undefined) {
+            if (message.content.c !== ownCiphertext) {
+                throw new Error(`Canonical message conflicts with local outbox id ${message.localId}`);
+            }
+            this.ownMessageCiphertextByLocalId.delete(message.localId);
+            logger.debug('[INBOX] Ignoring locally-produced session message', {
+                sessionId: this.sessionId,
+                messageId: message.id,
+                seq: message.seq,
+            });
+            return;
+        }
+
+        const body = decrypt(
+            this.encryptionKey,
+            this.encryptionVariant,
+            decodeBase64(message.content.c),
+        );
+        // Historical agent output is never executable input. This remains true
+        // even if an old server notification is replayed after reconnect.
+        if (body && typeof body === 'object' && body.role === 'agent') return;
+
+        const userResult = UserMessageSchema.safeParse(body);
+        if (userResult.success) {
+            const resolvedUserMessage = await resolveUserMessageImageReferences(userResult.data);
+            // Inbound work invalidates a previously reported safe-idle state
+            // immediately. Without a forced report, the normal 30-second
+            // heartbeat throttle can let daemon cleanup terminate a session
+            // which has just accepted a new prompt.
+            this.currentLastActivityAt = Date.now();
+            await this.reportDaemonActivity(true);
+            if (this.pendingMessageCallback) {
+                await this.pendingMessageCallback(resolvedUserMessage);
+            } else {
+                this.pendingMessages.push(resolvedUserMessage);
+            }
+            logger.debug('[INBOX] Delivered canonical user message', {
+                sessionId: this.sessionId,
+                messageId: message.id,
+                seq: message.seq,
+            });
+            return;
+        }
+
+        // Permission answers and future control messages intentionally do not
+        // need to match UserMessageSchema. Queue before advancing the DB cursor
+        // so messages arriving before listener registration remain available.
+        this.currentLastActivityAt = Date.now();
+        await this.reportDaemonActivity(true);
+        this.pendingControlMessages.push(body);
+        this.drainPendingControlMessages();
+    }
+
+    private drainPendingControlMessages(): void {
+        if (this.listenerCount('message') === 0) return;
+        while (this.pendingControlMessages.length > 0) {
+            const message = this.pendingControlMessages[0];
+            // EventEmitter dispatch is synchronous. Only remove the queued
+            // control after every current listener accepted the handoff.
+            super.emit('message', message);
+            this.pendingControlMessages.shift();
+        }
+    }
+
+    private enqueueEncryptedMessage(message: string): string {
+        this.currentLastActivityAt = Date.now();
+        const record = this.outbox.enqueue(message);
+        this.ownMessageCiphertextByLocalId.set(record.localId, record.message);
+        logger.debug('[OUTBOX] Persisted encrypted session message', {
+            sessionId: this.sessionId,
+            localId: record.localId,
+            pending: this.outbox.pendingCount,
+        });
+        void this.reportDaemonActivity();
+        this.scheduleOutboxDrain(0);
+        return record.localId;
+    }
+
+    private scheduleOutboxDrain(delayMs: number): void {
+        if (this.closed
+            || this.outboxBlockedByPermanentError
+            || this.outboxDrainPromise
+            || this.outboxRetryTimer) return;
+        if (delayMs > 0) {
+            this.outboxRetryTimer = setTimeout(() => {
+                this.outboxRetryTimer = null;
+                this.scheduleOutboxDrain(0);
+            }, delayMs);
+            this.outboxRetryTimer.unref?.();
+            return;
+        }
+        if (!this.socket.connected) return;
+
+        this.outboxDrainPromise = this.drainOutbox()
+            .catch((error) => {
+                logger.debug('[OUTBOX] Drain paused; pending messages remain durable', {
+                    sessionId: this.sessionId,
+                    pending: this.outbox.pendingCount,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            })
+            .finally(() => {
+                this.outboxDrainPromise = null;
+                if (!this.closed
+                    && !this.outboxBlockedByPermanentError
+                    && this.socket.connected
+                    && this.outbox.pendingCount > 0) {
+                    const ceiling = Math.min(
+                        this.outboxRetryMaxMs,
+                        this.outboxRetryBaseMs * (2 ** Math.min(this.outboxRetryAttempt++, 16)),
+                    );
+                    // Full jitter prevents all daemon sessions reconnecting together.
+                    this.scheduleOutboxDrain(Math.floor(Math.random() * (ceiling + 1)));
+                }
+            });
+    }
+
+    private async drainOutbox(): Promise<void> {
+        while (!this.closed && this.socket.connected) {
+            const record = this.outbox.pendingRecords()[0];
+            if (record) {
+                const acknowledged = await this.deliverOutboxRecord(record);
+                if (!acknowledged) return;
+                continue;
+            }
+            const sessionEnd = this.outbox.pendingSessionEnd();
+            if (!sessionEnd) return;
+            const acknowledged = await this.deliverSessionEnd(sessionEnd);
+            if (!acknowledged) return;
+        }
+    }
+
+    private async deliverOutboxRecord(record: SessionMessageOutboxRecord): Promise<boolean> {
+        const rawAnswer = await this.socket
+            .timeout(this.messageAckTimeoutMs)
+            .emitWithAck('message', {
+                sid: this.sessionId,
+                message: record.message,
+                localId: record.localId,
+            });
+        const parsedAnswer = SessionMessageAckSchema.safeParse(rawAnswer);
+        if (!parsedAnswer.success) throw new Error('Invalid session message ACK from server');
+        const answer = parsedAnswer.data;
+
+        if (answer.result === 'success') {
+            if (answer.message.localId !== record.localId) {
+                throw new Error('Session message ACK localId mismatch');
+            }
+            this.outbox.acknowledge(record.localId);
+            this.outboxRetryAttempt = 0;
+            logger.debug('[OUTBOX] Server durably acknowledged session message', {
+                sessionId: this.sessionId,
+                localId: record.localId,
+                seq: answer.message.seq,
+                duplicate: answer.duplicate,
+                pending: this.outbox.pendingCount,
+            });
+            void this.reportDaemonActivity();
+            return true;
+        }
+
+        logger.debug('[OUTBOX] Server rejected session message', {
+            sessionId: this.sessionId,
+            localId: record.localId,
+            code: answer.code,
+            retryable: answer.retryable,
+        });
+        if (answer.retryable) throw new Error(`Retryable session message rejection: ${answer.code}`);
+        // A permanent rejection (notably idempotency_conflict) must remain on
+        // disk for operator diagnosis; silently deleting it would lose data.
+        this.outbox.quarantine(record.localId, answer.code);
+        this.outboxBlockedByPermanentError = true;
+        void this.reportDaemonActivity();
+        return false;
+    }
+
+    private async deliverSessionEnd(record: SessionEndOutboxRecord): Promise<boolean> {
+        const rawAnswer = await this.socket
+            .timeout(this.messageAckTimeoutMs)
+            .emitWithAck('session-end', {
+                sid: this.sessionId,
+                time: record.createdAt,
+                localId: record.localId,
+                sessionInstanceId: record.sessionInstanceId,
+            });
+        const parsedAnswer = SessionEndAckSchema.safeParse(rawAnswer);
+        if (!parsedAnswer.success) throw new Error('Invalid session-end ACK from server');
+        const answer = parsedAnswer.data;
+        if (answer.result === 'success') {
+            if (answer.localId !== record.localId) throw new Error('Session-end ACK localId mismatch');
+            this.outbox.acknowledge(record.localId);
+            this.outboxRetryAttempt = 0;
+            void this.reportDaemonActivity();
+            return true;
+        }
+        if (answer.retryable) throw new Error(`Retryable session-end rejection: ${answer.code}`);
+        this.outbox.quarantine(record.localId, answer.code);
+        this.outboxBlockedByPermanentError = true;
+        void this.reportDaemonActivity();
+        return false;
+    }
+
+    private async reportDaemonActivity(force = false): Promise<void> {
+        if (this.metadata?.startedBy !== 'daemon' && this.metadata?.startedFromDaemon !== true) return;
+        await this.daemonActivityReportLock.inLock(async () => {
+            const now = Date.now();
+            const pendingOutbox = this.outbox.undeliveredCount;
+            const thinking = this.currentThinking;
+            const lastActivityAt = this.currentLastActivityAt;
+            const stateChanged = thinking !== this.lastReportedThinking
+                || pendingOutbox !== this.lastReportedPendingOutbox;
+            const becameUnsafeToExpire = thinking
+                || (pendingOutbox > 0 && (this.lastReportedPendingOutbox ?? 0) === 0);
+            const minimumInterval = becameUnsafeToExpire ? 0 : 5_000;
+            if (!force && stateChanged && now - this.lastDaemonActivityReportAt < minimumInterval) return;
+            if (!force && !stateChanged && now - this.lastDaemonActivityReportAt < 30_000) return;
+
+            try {
+                const result = await notifyDaemonSessionActivity(this.sessionId, {
+                    lastActivityAt,
+                    thinking,
+                    pendingOutbox,
+                });
+                if (result?.error) {
+                    logger.debug('[OUTBOX] Failed to report daemon session activity', {
+                        sessionId: this.sessionId,
+                        error: result.error,
+                    });
+                    return;
+                }
+                // Throttling is based only on evidence the daemon actually
+                // accepted. A failed POST must not suppress the next attempt.
+                this.lastDaemonActivityReportAt = now;
+                this.lastReportedThinking = thinking;
+                this.lastReportedPendingOutbox = pendingOutbox;
+            } catch (error) {
+                logger.debug('[OUTBOX] Failed to report daemon session activity', {
+                    sessionId: this.sessionId,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        });
     }
 }

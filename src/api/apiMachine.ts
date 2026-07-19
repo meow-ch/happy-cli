@@ -22,7 +22,7 @@ import packageJson from '../../package.json';
 
 interface ServerToDaemonEvents {
     update: (data: Update) => void;
-    'rpc-request': (data: { method: string, params: string }, callback: (response: string) => void) => void;
+    'rpc-request': (data: { callId?: string, method: string, params: string }, callback: (response: string) => void) => void;
     'rpc-registered': (data: { method: string }) => void;
     'rpc-unregistered': (data: { method: string }) => void;
     'rpc-error': (data: { type: string, error: string }) => void;
@@ -70,10 +70,12 @@ interface DaemonToServerEvents {
 
     'rpc-register': (data: { method: string }) => void;
     'rpc-unregister': (data: { method: string }) => void;
-    'rpc-call': (data: { method: string, params: any }, callback: (response: {
+    'rpc-call': (data: { callId?: string, method: string, params: any }, callback: (response: {
         ok: boolean
+        callId?: string
         result?: any
         error?: string
+        outcome?: 'unknown'
     }) => void) => void;
 }
 
@@ -398,7 +400,8 @@ export class ApiMachineClient {
             path: '/v1/updates',
             reconnection: true,
             reconnectionDelay: 1000,
-            reconnectionDelayMax: 5000
+            reconnectionDelayMax: 60000,
+            randomizationFactor: 1
         });
 
         this.socket.on('connect', () => {
@@ -433,7 +436,7 @@ export class ApiMachineClient {
         });
 
         // Single consolidated RPC handler
-        this.socket.on('rpc-request', async (data: { method: string, params: string }, callback: (response: string) => void) => {
+        this.socket.on('rpc-request', async (data: { callId?: string, method: string, params: string }, callback: (response: string) => void) => {
             logger.debugLargeJson(`[API MACHINE] Received RPC request:`, data);
             callback(await this.rpcHandlerManager.handleRequest(data));
         });

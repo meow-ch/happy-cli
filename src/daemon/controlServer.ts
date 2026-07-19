@@ -16,13 +16,20 @@ export function startDaemonControlServer({
   stopSession,
   spawnSession,
   requestShutdown,
-  onHappySessionWebhook
+  onHappySessionWebhook,
+  onHappySessionActivity,
 }: {
   getChildren: () => TrackedSession[] | Promise<TrackedSession[]>;
   stopSession: (sessionId: string) => boolean;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
+  onHappySessionActivity: (activity: {
+    sessionId: string;
+    lastActivityAt: number;
+    thinking: boolean;
+    pendingOutbox: number;
+  }) => void;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = fastify({
@@ -53,6 +60,23 @@ export function startDaemonControlServer({
       logger.debug(`[CONTROL SERVER] Session started: ${sessionId}`);
       onHappySessionWebhook(sessionId, metadata);
 
+      return { status: 'ok' as const };
+    });
+
+    typed.post('/session-activity', {
+      schema: {
+        body: z.object({
+          sessionId: z.string(),
+          lastActivityAt: z.number(),
+          thinking: z.boolean(),
+          pendingOutbox: z.number().int().nonnegative(),
+        }),
+        response: {
+          200: z.object({ status: z.literal('ok') })
+        }
+      }
+    }, async (request) => {
+      onHappySessionActivity(request.body);
       return { status: 'ok' as const };
     });
 

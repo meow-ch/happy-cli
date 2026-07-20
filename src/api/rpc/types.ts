@@ -16,6 +16,16 @@ export type RpcHandler<TRequest = any, TResponse = any> = (
  */
 export type RpcHandlerMap = Map<string, RpcHandler>;
 
+export interface RpcHandlerRegistrationOptions {
+    /**
+     * `durable` is the compatibility default and retains replayable results
+     * for a bounded retry horizon. `durable-acknowledged` retains results
+     * until the authoritative caller explicitly commits and acknowledges
+     * them. `read-only` bypasses the side-effect ledger.
+     */
+    execution?: 'durable' | 'durable-acknowledged' | 'read-only';
+}
+
 /**
  * RPC request data from server
  */

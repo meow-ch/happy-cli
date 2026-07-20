@@ -14,6 +14,7 @@ vi.mock('@/ui/logger', () => ({
 }));
 
 import { expandEnvironmentVariables } from './expandEnvVars';
+import { logger } from '@/ui/logger';
 
 describe('expandEnvironmentVariables', () => {
     it('should expand simple ${VAR} reference', () => {
@@ -71,6 +72,25 @@ describe('expandEnvironmentVariables', () => {
         expect(result).toEqual({
             ANTHROPIC_AUTH_TOKEN: 'sk-ant-real-key-12345'
         });
+    });
+
+    it('never logs resolved or default environment values', () => {
+        vi.mocked(logger.debug).mockClear();
+        const secret = 'sk-ant-must-never-reach-logs';
+        expect(expandEnvironmentVariables({
+            FROM_SOURCE: '${ANTHROPIC_AUTH_TOKEN}',
+            FROM_DEFAULT: `\${MISSING_TOKEN:-${secret}}`,
+        }, {
+            ANTHROPIC_AUTH_TOKEN: secret,
+        })).toEqual({
+            FROM_SOURCE: secret,
+            FROM_DEFAULT: secret,
+        });
+
+        const logged = vi.mocked(logger.debug).mock.calls.flat().join('\n');
+        expect(logged).not.toContain(secret);
+        expect(logged).toContain('ANTHROPIC_AUTH_TOKEN');
+        expect(logged).toContain('MISSING_TOKEN');
     });
 
     it('should preserve values without ${VAR} references', () => {

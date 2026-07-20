@@ -24,6 +24,14 @@ import { promisify } from 'util';
 import { logger } from '@/ui/logger';
 import { configuration } from '@/configuration';
 
+function safeSubprocessErrorCode(error: unknown): string | undefined {
+    if (!error || typeof error !== 'object' || !('code' in error)) return undefined;
+    const code = error.code;
+    return typeof code === 'string' && /^[A-Za-z0-9_.-]{1,32}$/.test(code)
+        ? code
+        : undefined;
+}
+
 export enum TmuxControlState {
     /** Normal text processing mode */
     NORMAL = "normal",
@@ -473,7 +481,15 @@ export class TmuxUtilities {
                 command: cmd
             };
         } catch (error) {
-            logger.debug('[TMUX] Command execution failed:', error);
+            // Node spawn errors expose the complete argv as enumerable
+            // `spawnargs`. Tmux environment values are passed via `-e`, so
+            // serializing the Error object would persist credentials. Log only
+            // a fixed marker and a tightly bounded OS error code.
+            const code = safeSubprocessErrorCode(error);
+            logger.debug('[TMUX] Command execution failed', {
+                error: 'tmux_subprocess_failed',
+                ...(code ? { code } : {}),
+            });
             return null;
         }
     }
@@ -812,15 +828,11 @@ export class TmuxUtilities {
                         continue;
                     }
 
-                    // Escape value for shell safety
-                    // Must escape: backslashes, double quotes, dollar signs, backticks
-                    const escapedValue = value
-                        .replace(/\\/g, '\\\\')   // Backslash first!
-                        .replace(/"/g, '\\"')     // Double quotes
-                        .replace(/\$/g, '\\$')    // Dollar signs
-                        .replace(/`/g, '\\`');    // Backticks
-
-                    createWindowArgs.push('-e', `${key}="${escapedValue}"`);
+                    // executeTmuxCommand ultimately calls spawn() with
+                    // shell:false. tmux therefore receives this as one argv
+                    // value and stores everything after the first '='
+                    // literally; shell escaping or quotes would corrupt it.
+                    createWindowArgs.push('-e', `${key}=${value}`);
                 }
                 logger.debug(`[TMUX] Setting ${Object.keys(env).length} environment variables in tmux window`);
             }
@@ -859,10 +871,17 @@ export class TmuxUtilities {
                 pid: panePid
             };
         } catch (error) {
-            logger.debug('[TMUX] Failed to spawn in tmux:', error);
+            // Do not serialize the Error or tmux stderr here. Either may echo
+            // the `-e KEY=value` argv used above. The caller only needs a
+            // stable failure signal because it falls back to regular spawn.
+            const code = safeSubprocessErrorCode(error);
+            logger.debug('[TMUX] Failed to spawn in tmux', {
+                error: 'tmux_spawn_failed',
+                ...(code ? { code } : {}),
+            });
             return {
                 success: false,
-                error: error instanceof Error ? error.message : String(error)
+                error: 'Failed to spawn in tmux',
             };
         }
     }

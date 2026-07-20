@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -32,6 +32,13 @@ function encryptedParams(value: unknown): string {
 
 function decryptedResponse(value: string): any {
     return decrypt(key, 'legacy', decodeBase64(value));
+}
+
+function ledgerRecords(directory: string): Array<Record<string, unknown>> {
+    if (!existsSync(directory)) return [];
+    return readdirSync(directory)
+        .filter((name) => /^[a-f0-9]{64}\.json$/.test(name))
+        .map((name) => JSON.parse(readFileSync(join(directory, name), 'utf8')) as Record<string, unknown>);
 }
 
 afterEach(() => {
@@ -118,32 +125,187 @@ describe('RpcHandlerManager durable call ledger', () => {
         expect(handler).toHaveBeenCalledTimes(2);
     });
 
-    it('prunes oldest completed records to its configured hard count bound', async () => {
+    it('bypasses durable reservations only for explicitly registered read-only handlers', async () => {
+        const directory = createDirectory();
+        const manager = createManager(directory);
+        const readOnly = vi.fn(async () => ({ value: 1 }));
+        manager.registerHandler('provider-readiness', readOnly, { execution: 'read-only' });
+
+        await manager.handleRequest({
+            callId: '935366e7-11c8-4601-9408-7ed222f46e5b',
+            method: 'scope:provider-readiness',
+            params: encryptedParams({ provider: 'claude' }),
+        });
+        await manager.handleRequest({
+            callId: '201c5f60-e206-49de-85ff-a4c2c448b651',
+            method: 'scope:provider-readiness',
+            params: encryptedParams({ provider: 'claude' }),
+        });
+
+        expect(readOnly).toHaveBeenCalledTimes(2);
+        expect(ledgerRecords(directory)).toEqual([]);
+
+        // A name that merely resembles a probe remains durable unless its
+        // trusted registration explicitly opts out.
+        const durable = vi.fn(async () => ({ spawned: true }));
+        manager.registerHandler('spawn-happy-session', durable);
+        await manager.handleRequest({
+            callId: '7f5db35e-258b-407a-8a90-a263b831fc3c',
+            method: 'scope:spawn-happy-session',
+            params: encryptedParams({ directory: '/tmp/work' }),
+        });
+        expect(durable).toHaveBeenCalledOnce();
+        expect(ledgerRecords(directory)).toHaveLength(1);
+    });
+
+    it('does not reserve durable capacity for unknown methods', async () => {
+        const directory = createDirectory();
+        const manager = createManager(directory);
+
+        const response = await manager.handleRequest({
+            callId: '6bc5b935-f0ea-4482-bda6-1a0559169855',
+            method: 'scope:removed-method',
+            params: encryptedParams({}),
+        });
+
+        expect(decryptedResponse(response)).toEqual({ error: 'Method not found' });
+        expect(ledgerRecords(directory)).toEqual([]);
+    });
+
+    it('acknowledges a persisted caller-committed result after its handler is removed', async () => {
+        const directory = createDirectory();
+        const manager = createManager(directory);
+        const callId = '005614fc-14c6-49db-85f1-cb6c5469c23b';
+        manager.registerHandler(
+            'agent-plane-effect',
+            async () => ({ committed: true }),
+            { execution: 'durable-acknowledged' },
+        );
+        const firstResponse = await manager.handleRequest({
+            callId,
+            method: 'scope:agent-plane-effect',
+            params: encryptedParams({}),
+        });
+        manager.clearHandlers();
+
+        const replayAfterRemoval = await manager.handleRequest({
+            callId,
+            method: 'scope:agent-plane-effect',
+            params: encryptedParams({}),
+        });
+        expect(replayAfterRemoval).toBe(firstResponse);
+
+        await expect(manager.acknowledgeDurableResult({
+            callId,
+            method: 'agent-plane-effect',
+        })).resolves.toEqual({ status: 'acknowledged' });
+        expect(ledgerRecords(directory)).toEqual([
+            expect.objectContaining({
+                callId,
+                status: 'tombstone',
+                reason: 'acknowledged',
+            }),
+        ]);
+    });
+
+    it('rejects ACKs for compatibility time-bounded results', async () => {
+        const directory = createDirectory();
+        const manager = createManager(directory);
+        const callId = 'd2129178-b463-4e1a-a24f-9bb023711af7';
+        manager.registerHandler('legacy-effect', async () => ({ committed: true }));
+        await manager.handleRequest({
+            callId,
+            method: 'scope:legacy-effect',
+            params: encryptedParams({}),
+        });
+
+        await expect(manager.acknowledgeDurableResult({
+            callId,
+            method: 'legacy-effect',
+        })).resolves.toEqual({
+            status: 'conflict',
+            reason: 'RPC result does not use caller-acknowledged retention',
+        });
+    });
+
+    it('ages only compatibility time-bounded results after the retry horizon', async () => {
         const directory = createDirectory();
         let now = 1;
         const ledger = new RpcResultLedger({
             directory,
-            maxEntries: 2,
+            maxEntries: 1,
             maxTotalBytes: 1024 * 1024,
-            now: () => now++,
+            now: () => now,
         });
-        for (const callId of [
-            '5385341a-72ab-47c0-9aa2-a3ed6567fb2c',
-            'ce875e89-b3a3-4c4c-894e-977b92472854',
-            'd3aa76b2-c7f8-4d65-860e-f7fa07fc3a7f',
-        ]) {
-            expect((await ledger.execute(
-                { callId, method: 'scope:bounded', paramsHash: hashObject({ value: callId }) },
-                async () => 'encrypted-result',
-            )).status).toBe('completed');
-            now += 24 * 60 * 60 * 1_000 + 1;
-        }
+        expect((await ledger.execute({
+            callId: 'fc54fbed-9069-4269-a271-ac9c20ec460d',
+            method: 'scope:compatibility-side-effect',
+            paramsHash: hashObject({ value: 1 }),
+        }, async () => 'first')).status).toBe('completed');
 
-        expect(readdirSync(directory).filter((name) => /^[a-f0-9]{64}\.json$/.test(name)))
-            .toHaveLength(2);
+        now += 24 * 60 * 60 * 1_000 + 1;
+        expect((await ledger.execute({
+            callId: '5d358453-ad1b-49fe-9860-abcb658b002a',
+            method: 'scope:compatibility-side-effect',
+            paramsHash: hashObject({ value: 2 }),
+        }, async () => 'replacement')).status).toBe('completed');
+        expect(ledgerRecords(directory)).toEqual([
+            expect.objectContaining({
+                callId: '5d358453-ad1b-49fe-9860-abcb658b002a',
+                retention: 'time_bounded',
+            }),
+        ]);
     });
 
-    it('fails closed instead of evicting results inside the 24-hour retry horizon', async () => {
+    it('never ages an unacknowledged result into a re-executable side effect', async () => {
+        const directory = createDirectory();
+        let now = 1;
+        const ledger = new RpcResultLedger({
+            directory,
+            maxEntries: 1,
+            maxTotalBytes: 1024 * 1024,
+            now: () => now,
+        });
+        const firstCallId = '5385341a-72ab-47c0-9aa2-a3ed6567fb2c';
+        const firstInput = {
+            callId: firstCallId,
+            method: 'scope:bounded',
+            paramsHash: hashObject({ value: firstCallId }),
+            retention: 'caller_acknowledged' as const,
+        };
+        expect((await ledger.execute(firstInput, async () => 'encrypted-result')).status)
+            .toBe('completed');
+
+        now += 365 * 24 * 60 * 60 * 1_000;
+        const blockedExecutor = vi.fn(async () => 'must-not-run-before-ack');
+        expect((await ledger.execute({
+            callId: 'ce875e89-b3a3-4c4c-894e-977b92472854',
+            method: 'scope:bounded',
+            paramsHash: hashObject({ value: 2 }),
+            retention: 'caller_acknowledged',
+        }, blockedExecutor)).status).toBe('unavailable');
+        expect(blockedExecutor).not.toHaveBeenCalled();
+
+        expect(await ledger.acknowledge({ callId: firstCallId, method: 'scope:bounded' }))
+            .toEqual({ status: 'acknowledged' });
+        const delayedDuplicate = vi.fn(async () => 'must-not-reexecute-after-ack');
+        expect(await ledger.execute(firstInput, delayedDuplicate)).toEqual({
+            status: 'unavailable',
+            reason: 'RPC outcome was already acknowledged; refusing to re-execute the side effect',
+        });
+        expect(delayedDuplicate).not.toHaveBeenCalled();
+
+        expect((await ledger.execute({
+            callId: 'd3aa76b2-c7f8-4d65-860e-f7fa07fc3a7f',
+            method: 'scope:bounded',
+            paramsHash: hashObject({ value: 3 }),
+            retention: 'caller_acknowledged',
+        }, async () => 'next-result')).status).toBe('completed');
+        expect(ledgerRecords(directory).map((record) => record.status).sort())
+            .toEqual(['completed', 'tombstone']);
+    });
+
+    it('fails closed at active capacity until the authoritative caller acknowledges a result', async () => {
         const directory = createDirectory();
         let now = 10_000;
         const ledger = new RpcResultLedger({
@@ -158,12 +320,14 @@ describe('RpcHandlerManager durable call ledger', () => {
             callId: '167c9274-d005-45e0-8f4d-c7cb4de9b5a2',
             method: 'scope:retained',
             paramsHash: hashObject({ value: 1 }),
+            retention: 'caller_acknowledged',
         }, firstExecutor)).status).toBe('completed');
 
         const blocked = await ledger.execute({
             callId: 'b320c948-9040-4949-96d7-84a6c986e582',
             method: 'scope:retained',
             paramsHash: hashObject({ value: 2 }),
+            retention: 'caller_acknowledged',
         }, blockedExecutor);
 
         expect(blocked.status).toBe('unavailable');
@@ -171,12 +335,64 @@ describe('RpcHandlerManager durable call ledger', () => {
         expect(readdirSync(directory).filter((name) => /^[a-f0-9]{64}\.json$/.test(name)))
             .toHaveLength(1);
 
-        now += 24 * 60 * 60 * 1_000 + 1;
+        now += 100 * 24 * 60 * 60 * 1_000;
         expect((await ledger.execute({
             callId: 'f40440a8-735f-4a53-b0e8-d062d3a188c4',
             method: 'scope:retained',
             paramsHash: hashObject({ value: 3 }),
+            retention: 'caller_acknowledged',
+        }, async () => 'still-blocked')).status).toBe('unavailable');
+
+        expect(await ledger.acknowledge({
+            callId: '167c9274-d005-45e0-8f4d-c7cb4de9b5a2',
+            method: 'scope:retained',
+        })).toEqual({ status: 'acknowledged' });
+        expect((await ledger.execute({
+            callId: 'f40440a8-735f-4a53-b0e8-d062d3a188c4',
+            method: 'scope:retained',
+            paramsHash: hashObject({ value: 3 }),
+            retention: 'caller_acknowledged',
         }, async () => 'replacement')).status).toBe('completed');
+        expect(ledgerRecords(directory).map((record) => record.status).sort())
+            .toEqual(['completed', 'tombstone']);
+    });
+
+    it('permanently fences a side effect when its encrypted response cannot fit', async () => {
+        const directory = createDirectory();
+        const ledger = new RpcResultLedger({
+            directory,
+            maxEntries: 1,
+            maxTotalBytes: 1_024,
+            maxResultBytes: 2_048,
+        });
+        const callId = '323574c6-958b-4682-b104-7b252bd35731';
+        const input = {
+            callId,
+            method: 'scope:oversized-persisted-response',
+            paramsHash: hashObject({ value: 1 }),
+            retention: 'caller_acknowledged' as const,
+        };
+        const executor = vi.fn(async () => 'x'.repeat(900));
+
+        expect(await ledger.execute(input, executor)).toEqual({
+            status: 'unavailable',
+            reason: 'RPC result ledger has no durable result capacity',
+        });
+        expect(executor).toHaveBeenCalledOnce();
+        expect(ledgerRecords(directory)).toEqual([
+            expect.objectContaining({
+                callId,
+                status: 'tombstone',
+                reason: 'unknown_outcome',
+            }),
+        ]);
+
+        const duplicateExecutor = vi.fn(async () => 'must-not-run');
+        await expect(ledger.execute(input, duplicateExecutor)).resolves.toEqual({
+            status: 'unavailable',
+            reason: 'Previous RPC executor exited with an unknown outcome',
+        });
+        expect(duplicateExecutor).not.toHaveBeenCalled();
     });
 
     it('serializes concurrent capacity reservations across ledger instances', async () => {
@@ -212,38 +428,54 @@ describe('RpcHandlerManager durable call ledger', () => {
             .toHaveLength(1);
     });
 
-    it('honors a configured retention horizon longer than 24 hours', async () => {
+    it('GCs only acknowledged tombstones after the configured delivery grace', async () => {
         const directory = createDirectory();
         const day = 24 * 60 * 60 * 1_000;
         let now = 1_000;
         const ledger = new RpcResultLedger({
             directory,
             maxEntries: 1,
+            maxTombstoneEntries: 1,
             maxTotalBytes: 1024 * 1024,
-            minCompletedRetentionMs: 2 * day,
+            acknowledgedTombstoneRetentionMs: 2 * day,
             now: () => now,
         });
         expect((await ledger.execute({
             callId: 'b07a669c-af73-4857-97f9-725c111017a1',
             method: 'scope:retained-longer',
             paramsHash: hashObject({ value: 1 }),
+            retention: 'caller_acknowledged',
         }, async () => 'first')).status).toBe('completed');
 
-        now += day + 1;
-        const tooYoungExecutor = vi.fn(async () => 'too-young');
+        expect(await ledger.acknowledge({
+            callId: 'b07a669c-af73-4857-97f9-725c111017a1',
+            method: 'scope:retained-longer',
+        })).toEqual({ status: 'acknowledged' });
         expect((await ledger.execute({
             callId: '86ef2e7b-7be4-4838-af0e-2c83069f8a95',
             method: 'scope:retained-longer',
             paramsHash: hashObject({ value: 2 }),
-        }, tooYoungExecutor)).status).toBe('unavailable');
-        expect(tooYoungExecutor).not.toHaveBeenCalled();
+            retention: 'caller_acknowledged',
+        }, async () => 'second')).status).toBe('completed');
+
+        now += day + 1;
+        expect((await ledger.acknowledge({
+            callId: '86ef2e7b-7be4-4838-af0e-2c83069f8a95',
+            method: 'scope:retained-longer',
+        })).status).toBe('unavailable');
 
         now += day;
-        expect((await ledger.execute({
-            callId: '03e6283d-c280-4521-ad16-77748a4db377',
+        expect(await ledger.acknowledge({
+            callId: '86ef2e7b-7be4-4838-af0e-2c83069f8a95',
             method: 'scope:retained-longer',
-            paramsHash: hashObject({ value: 3 }),
-        }, async () => 'eligible-replacement')).status).toBe('completed');
+        })).toEqual({ status: 'acknowledged' });
+        expect(ledgerRecords(directory)).toEqual([
+            expect.objectContaining({
+                callId: '86ef2e7b-7be4-4838-af0e-2c83069f8a95',
+                status: 'tombstone',
+                reason: 'acknowledged',
+            }),
+        ]);
     });
 
     it('fails closed on a malformed live lock without executing the handler', async () => {
@@ -309,6 +541,7 @@ describe('RpcHandlerManager durable call ledger', () => {
         );
         const ledger = new RpcResultLedger({
             directory,
+            maxEntries: 1,
             lockTimeoutMs: 100,
             pollIntervalMs: 5,
             pendingWaitMs: 20,
@@ -333,6 +566,8 @@ describe('RpcHandlerManager durable call ledger', () => {
             response: 'recovered-result',
             replayed: false,
         });
+        expect(ledgerRecords(directory).map((record) => record.status).sort())
+            .toEqual(['completed', 'tombstone']);
         const latestLock = readdirSync(directory)
             .filter((name) => name.startsWith('.ledger-lock-') && name.endsWith('.json'))
             .sort()
@@ -370,5 +605,57 @@ describe('RpcHandlerManager durable call ledger', () => {
             replayed: false,
         });
         expect(executor).toHaveBeenCalledTimes(1);
+    });
+
+    it('fences an unknown pending call when the operating system reused its owner PID', async () => {
+        const directory = createDirectory();
+        const callId = '055bd285-ff95-49f7-9e79-bd6335cb2096';
+        const method = 'scope:pending-pid-reuse';
+        const paramsHash = hashObject({ value: 1 });
+        const fingerprint = createHash('sha256')
+            .update(method)
+            .update('\0')
+            .update(paramsHash)
+            .digest('hex');
+        writeFileSync(
+            join(directory, `${createHash('sha256').update(callId).digest('hex')}.json`),
+            JSON.stringify({
+                version: 1,
+                status: 'pending',
+                callId,
+                method,
+                paramsHash,
+                fingerprint,
+                ownerPid: process.pid,
+                ownerInstanceId: 'a-prior-process-with-the-same-pid',
+                ownerToken: 'stale-pending-owner',
+                createdAt: 1,
+                retention: 'caller_acknowledged',
+            }),
+        );
+        const ledger = new RpcResultLedger({
+            directory,
+            pollIntervalMs: 5,
+            pendingWaitMs: 20,
+        });
+        const executor = vi.fn(async () => 'unsafe');
+
+        await expect(ledger.execute({
+            callId,
+            method,
+            paramsHash,
+            retention: 'caller_acknowledged',
+        }, executor)).resolves.toEqual({
+            status: 'unavailable',
+            reason: 'Previous RPC executor exited with an unknown outcome',
+        });
+        expect(executor).not.toHaveBeenCalled();
+        expect(ledgerRecords(directory)).toEqual([
+            expect.objectContaining({
+                callId,
+                status: 'tombstone',
+                reason: 'unknown_outcome',
+            }),
+        ]);
     });
 });

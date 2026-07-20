@@ -1,6 +1,7 @@
 import type { SDKMessage, SDKAssistantMessage, SDKResultMessage, SDKSystemMessage, SDKUserMessage } from '@/claude/sdk'
 import type { MessageBuffer } from './ink/messageBuffer'
 import { logger } from './logger'
+import { sanitizeClaudeMessageForLogging } from '@/claude/sdk/sanitizeMessageForLogging'
 
 export type OnAssistantResultInkCallback = (result: SDKResultMessage, messageBuffer: MessageBuffer) => void | Promise<void>
 
@@ -12,7 +13,10 @@ export function formatClaudeMessageForInk(
     messageBuffer: MessageBuffer,
     onAssistantResult?: OnAssistantResultInkCallback
 ): void {
-    logger.debugLargeJson('[CLAUDE INK] Message from remote mode:', message)
+    logger.debugLargeJson(
+        '[CLAUDE INK] Message from remote mode:',
+        sanitizeClaudeMessageForLogging(message),
+    )
 
     switch (message.type) {
         case 'system': {
@@ -92,7 +96,14 @@ export function formatClaudeMessageForInk(
 
         case 'result': {
             const resultMsg = message as SDKResultMessage
-            if (resultMsg.subtype === 'success') {
+            if (resultMsg.is_error === true) {
+                messageBuffer.addMessage('❌ Claude could not complete the request', 'result')
+                messageBuffer.addMessage(`Completed ${resultMsg.num_turns} turns before error`, 'status')
+                logger.debugLargeJson(
+                    '[RESULT] Claude execution error',
+                    sanitizeClaudeMessageForLogging(resultMsg),
+                )
+            } else if (resultMsg.subtype === 'success') {
                 if ('result' in resultMsg && resultMsg.result) {
                     messageBuffer.addMessage('✨ Summary:', 'result')
                     messageBuffer.addMessage(resultMsg.result || '', 'result')
@@ -124,7 +135,10 @@ export function formatClaudeMessageForInk(
             } else if (resultMsg.subtype === 'error_during_execution') {
                 messageBuffer.addMessage('❌ Error during execution', 'result')
                 messageBuffer.addMessage(`Completed ${resultMsg.num_turns} turns before error`, 'status')
-                logger.debugLargeJson('[RESULT] Error during execution', resultMsg)
+                logger.debugLargeJson(
+                    '[RESULT] Error during execution',
+                    sanitizeClaudeMessageForLogging(resultMsg),
+                )
             }
             break
         }

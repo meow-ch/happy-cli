@@ -28,10 +28,12 @@ import { logger } from '@/ui/logger';
  */
 export function expandEnvironmentVariables(
     envVars: Record<string, string>,
-    sourceEnv: NodeJS.ProcessEnv = process.env
+    sourceEnv: NodeJS.ProcessEnv = process.env,
+    options: { log?: boolean } = {},
 ): Record<string, string> {
     const expanded: Record<string, string> = {};
     const undefinedVars: string[] = [];
+    const shouldLog = options.log !== false;
 
     for (const [key, value] of Object.entries(envVars)) {
         // Replace all ${VAR} and ${VAR:-default} references with actual values from sourceEnv
@@ -54,24 +56,24 @@ export function expandEnvironmentVariables(
             const resolvedValue = sourceEnv[varName];
             if (resolvedValue !== undefined) {
                 // Variable found in source environment - use its value
-                // Log for debugging (mask secret-looking values)
-                const isSensitive = varName.toLowerCase().includes('token') ||
-                                   varName.toLowerCase().includes('key') ||
-                                   varName.toLowerCase().includes('secret');
-                const displayValue = isSensitive
-                    ? (resolvedValue ? `<${resolvedValue.length} chars>` : '<empty>')
-                    : resolvedValue;
-                logger.debug(`[EXPAND ENV] Expanded ${varName} from daemon env: ${displayValue}`);
+                if (shouldLog) {
+                    // Values are never logged. Secret-name heuristics are not
+                    // reliable enough to decide which environment values are
+                    // safe to persist in daemon logs.
+                    logger.debug(`[EXPAND ENV] Expanded ${varName} from daemon env (${resolvedValue === '' ? 'empty' : 'present'})`);
+                }
 
                 // Warn if empty string (common mistake)
-                if (resolvedValue === '') {
+                if (shouldLog && resolvedValue === '') {
                     logger.warn(`[EXPAND ENV] WARNING: ${varName} is set but EMPTY in daemon environment`);
                 }
 
                 return resolvedValue;
             } else if (defaultValue !== undefined) {
                 // Variable not found but default value provided - use default
-                logger.debug(`[EXPAND ENV] Using default value for ${varName}: ${defaultValue}`);
+                if (shouldLog) {
+                    logger.debug(`[EXPAND ENV] Using configured default for ${varName} (value omitted)`);
+                }
                 return defaultValue;
             } else {
                 // Variable not found and no default - keep placeholder and warn
@@ -84,7 +86,7 @@ export function expandEnvironmentVariables(
     }
 
     // Log warning if any variables couldn't be resolved
-    if (undefinedVars.length > 0) {
+    if (shouldLog && undefinedVars.length > 0) {
         logger.warn(`[EXPAND ENV] Undefined variables referenced in profile environment: ${undefinedVars.join(', ')}`);
         logger.warn(`[EXPAND ENV] Session may fail to authenticate. Set these in daemon environment before launching:`);
         undefinedVars.forEach(varName => {

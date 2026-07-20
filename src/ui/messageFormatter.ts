@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import type { SDKMessage, SDKAssistantMessage, SDKResultMessage, SDKSystemMessage, SDKUserMessage } from '@/claude/sdk';
 import { logger } from './logger';
+import { sanitizeClaudeMessageForLogging } from '@/claude/sdk/sanitizeMessageForLogging';
 
 export type OnAssistantResultCallback = (result: SDKResultMessage) => void | Promise<void>;
 
@@ -11,7 +12,10 @@ export function formatClaudeMessage(
     message: SDKMessage,
     onAssistantResult?: OnAssistantResultCallback
 ): void {
-    logger.debugLargeJson('[CLAUDE] Message from non interactive & remote mode:', message)
+    logger.debugLargeJson(
+        '[CLAUDE] Message from non interactive & remote mode:',
+        sanitizeClaudeMessageForLogging(message),
+    );
 
     switch (message.type) {
         case 'system': {
@@ -96,7 +100,14 @@ export function formatClaudeMessage(
 
         case 'result': {
             const resultMsg = message as SDKResultMessage;
-            if (resultMsg.subtype === 'success') {
+            if (resultMsg.is_error === true) {
+                console.log(chalk.red.bold('\n❌ Claude could not complete the request'));
+                console.log(chalk.gray(`Completed ${resultMsg.num_turns} turns before error`));
+                logger.debugLargeJson(
+                    '[RESULT] Claude execution error',
+                    sanitizeClaudeMessageForLogging(resultMsg),
+                );
+            } else if (resultMsg.subtype === 'success') {
                 if ('result' in resultMsg && resultMsg.result) {
                     console.log(chalk.green.bold('\n✨ Summary:'));
                     console.log(resultMsg.result);
@@ -134,7 +145,10 @@ export function formatClaudeMessage(
             } else if (resultMsg.subtype === 'error_during_execution') {
                 console.log(chalk.red.bold('\n❌ Error during execution'));
                 console.log(chalk.gray(`Completed ${resultMsg.num_turns} turns before error`));
-                logger.debugLargeJson('[RESULT] Error during execution', resultMsg)
+                logger.debugLargeJson(
+                    '[RESULT] Error during execution',
+                    sanitizeClaudeMessageForLogging(resultMsg),
+                );
             }
             break;
         }

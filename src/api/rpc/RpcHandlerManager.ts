@@ -10,6 +10,7 @@ import {
     RpcHandlerMap,
     RpcRequest,
     RpcHandlerConfig,
+    RpcHandlerRegistrationOptions,
 } from './types';
 import { Socket } from 'socket.io-client';
 import { RpcResultLedger } from './RpcResultLedger';
@@ -18,6 +19,8 @@ import { hashObject } from '@/utils/deterministicJson';
 
 export class RpcHandlerManager {
     private handlers: RpcHandlerMap = new Map();
+    private readOnlyHandlers = new Set<string>();
+    private callerAcknowledgedHandlers = new Set<string>();
     private readonly scopePrefix: string;
     private readonly encryptionKey: Uint8Array;
     private readonly encryptionVariant: 'legacy' | 'dataKey';
@@ -40,12 +43,26 @@ export class RpcHandlerManager {
      */
     registerHandler<TRequest = any, TResponse = any>(
         method: string,
-        handler: RpcHandler<TRequest, TResponse>
+        handler: RpcHandler<TRequest, TResponse>,
+        options: RpcHandlerRegistrationOptions = {},
     ): void {
         const prefixedMethod = this.getPrefixedMethod(method);
 
         // Store the handler
         this.handlers.set(prefixedMethod, handler);
+        if (options.execution === 'read-only') {
+            this.readOnlyHandlers.add(prefixedMethod);
+            this.callerAcknowledgedHandlers.delete(prefixedMethod);
+        } else {
+            // Time-bounded durability is the compatibility default for Happy
+            // callers which do not yet implement the explicit ACK lifecycle.
+            this.readOnlyHandlers.delete(prefixedMethod);
+            if (options.execution === 'durable-acknowledged') {
+                this.callerAcknowledgedHandlers.add(prefixedMethod);
+            } else {
+                this.callerAcknowledgedHandlers.delete(prefixedMethod);
+            }
+        }
 
         if (this.socket) {
             this.socket.emit('rpc-register', { method: prefixedMethod });
@@ -85,12 +102,34 @@ export class RpcHandlerManager {
         if (!z.string().uuid().safeParse(request.callId).success) {
             return this.encryptError('Invalid RPC callId');
         }
+        const paramsHash = hashObject(decryptedParams);
+        // Unknown methods cannot execute a new side effect or reserve a slot.
+        // They may, however, replay a result persisted before a rolling
+        // upgrade removed the handler.
+        if (!this.handlers.has(request.method)) {
+            const existing = await this.resultLedger.replayExisting({
+                callId: request.callId,
+                method: request.method,
+                paramsHash,
+            });
+            if (existing.status === 'completed') return existing.response;
+            if (existing.status !== 'not_found') return this.encryptError(existing.reason);
+            return this.executeHandler(request, decryptedParams);
+        }
+        // Only trusted registration sites may opt a method out of durable
+        // execution. Never infer this from the caller-controlled method name.
+        if (this.readOnlyHandlers.has(request.method)) {
+            return this.executeHandler(request, decryptedParams);
+        }
 
         const outcome = await this.resultLedger.execute(
             {
                 callId: request.callId,
                 method: request.method,
-                paramsHash: hashObject(decryptedParams),
+                paramsHash,
+                retention: this.callerAcknowledgedHandlers.has(request.method)
+                    ? 'caller_acknowledged'
+                    : 'time_bounded',
             },
             () => this.executeHandler(request, decryptedParams),
         );
@@ -102,6 +141,22 @@ export class RpcHandlerManager {
             reason: outcome.reason,
         });
         return this.encryptError(outcome.reason);
+    }
+
+    async acknowledgeDurableResult(input: {
+        callId: string;
+        method: string;
+    }) {
+        if (!z.string().uuid().safeParse(input.callId).success) {
+            return { status: 'conflict' as const, reason: 'Invalid RPC acknowledgement callId' };
+        }
+        if (typeof input.method !== 'string' || input.method.length === 0) {
+            return { status: 'conflict' as const, reason: 'Invalid RPC acknowledgement method' };
+        }
+        return this.resultLedger.acknowledge({
+            callId: input.callId,
+            method: this.getPrefixedMethod(input.method),
+        });
     }
 
     private async executeHandler(request: RpcRequest, decryptedParams: unknown): Promise<string> {
@@ -175,6 +230,8 @@ export class RpcHandlerManager {
      */
     clearHandlers(): void {
         this.handlers.clear();
+        this.readOnlyHandlers.clear();
+        this.callerAcknowledgedHandlers.clear();
         this.logger('Cleared all RPC handlers');
     }
 

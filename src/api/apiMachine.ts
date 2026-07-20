@@ -18,6 +18,10 @@ import {
     PrepareAgentPlaneSessionResponse
 } from './agentPlaneSessionPrep';
 import type { DaemonSessionStatus } from '@/daemon/sessionRegistry';
+import type {
+    ProviderReadinessRequest,
+    ProviderReadinessResponse,
+} from '@/claude/claudeAuthReadiness';
 import packageJson from '../../package.json';
 
 interface ServerToDaemonEvents {
@@ -97,6 +101,7 @@ type MachineRpcHandlers = {
         trackingSource?: 'memory' | 'registry';
         terminalProtocol?: 1;
     }>>;
+    providerReadiness: (request: ProviderReadinessRequest) => Promise<ProviderReadinessResponse>;
     requestShutdown: () => void;
 }
 
@@ -111,6 +116,15 @@ const DAEMON_MANAGED_MACHINE_METADATA_KEYS = [
     'claudeCodeLatestVersion',
     'claudeCodeUpdateCommand',
 ] as const;
+
+const MAX_AGENT_PLANE_RPC_ERROR_CHARS = 2_000;
+
+function boundedAgentPlaneRpcError(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.length > MAX_AGENT_PLANE_RPC_ERROR_CHARS
+        ? `${message.slice(0, MAX_AGENT_PLANE_RPC_ERROR_CHARS)}…`
+        : message;
+}
 
 type DaemonManagedMachineMetadataKey = typeof DAEMON_MANAGED_MACHINE_METADATA_KEYS[number];
 
@@ -133,6 +147,38 @@ export function buildDaemonCapabilities() {
                 transport: 'acp',
                 terminalTypes: ['task_complete', 'task_failed', 'turn_aborted'],
                 legacyReady: 'ui_idle_only',
+            },
+            agentPlaneProviderReadiness: {
+                supported: true,
+                rpcMethod: 'provider-readiness',
+                providers: ['claude'],
+                verification: 'claude_auth_status',
+                environmentVariablesModes: ['replace', 'overlay'],
+            },
+            agentPlaneSessionSpawn: {
+                supported: true,
+                rpcMethod: 'spawn-agent-plane-session',
+                requestShape: 'spawn-happy-session-v1',
+                responseShape: 'spawn-happy-session-v1',
+                resultRetention: 'caller_acknowledged',
+            },
+            agentPlaneSessionStop: {
+                supported: true,
+                rpcMethod: 'stop-agent-plane-session',
+                requestShape: 'stop-session-v1',
+                responseShape: 'stop-agent-plane-session-v1',
+                resultRetention: 'caller_acknowledged',
+                processExitSemantics: 'not_confirmed',
+            },
+            agentPlaneRpcResultAcknowledgement: {
+                supported: true,
+                rpcMethod: 'acknowledge-rpc-result',
+                acknowledgeAfter: 'authoritative_caller_commit',
+                callerAcknowledgedMethods: [
+                    'prepare-agent-plane-session',
+                    'spawn-agent-plane-session',
+                    'stop-agent-plane-session',
+                ],
             },
             agentPlaneGoals: {
                 supported: true,
@@ -224,19 +270,83 @@ export class ApiMachineClient {
         registerCommonHandlers(this.rpcHandlerManager, process.cwd());
         this.rpcHandlerManager.registerHandler<PrepareAgentPlaneSessionRequest, PrepareAgentPlaneSessionResponse>(
             'prepare-agent-plane-session',
-            async (params) => prepareAgentPlaneSession(params)
+            async (params) => {
+                try {
+                    return await prepareAgentPlaneSession(params);
+                } catch (error) {
+                    const message = boundedAgentPlaneRpcError(error);
+                    logger.debug(`[API MACHINE] Agent Plane session preparation rejected: ${message}`);
+                    return {
+                        type: 'prepare_rejected',
+                        error: message,
+                        retryable: true,
+                    };
+                }
+            },
+            { execution: 'durable-acknowledged' },
         );
-        this.rpcHandlerManager.registerHandler('daemon-capabilities', async () => buildDaemonCapabilities());
+        this.rpcHandlerManager.registerHandler(
+            'daemon-capabilities',
+            async () => buildDaemonCapabilities(),
+            { execution: 'read-only' },
+        );
+        this.rpcHandlerManager.registerHandler(
+            'acknowledge-rpc-result',
+            async (params: unknown) => {
+                if (!isRecord(params)
+                    || typeof params.callId !== 'string'
+                    || typeof params.method !== 'string') {
+                    throw new Error('Invalid RPC result acknowledgement');
+                }
+                return this.rpcHandlerManager.acknowledgeDurableResult({
+                    callId: params.callId,
+                    method: params.method,
+                });
+            },
+            { execution: 'read-only' },
+        );
     }
 
     setRPCHandlers({
         spawnSession,
         stopSession,
         sessionStatusList,
+        providerReadiness,
         requestShutdown
     }: MachineRpcHandlers) {
-        // Register spawn session handler
-        this.rpcHandlerManager.registerHandler('spawn-happy-session', async (params: any) => {
+        this.rpcHandlerManager.registerHandler<ProviderReadinessRequest, ProviderReadinessResponse>(
+            'provider-readiness',
+            async (params) => {
+                if (!params || params.provider !== 'claude') {
+                    throw new Error('Unsupported provider readiness request');
+                }
+                const environmentVariables = params.environmentVariables;
+                if (environmentVariables !== undefined && (
+                    !isRecord(environmentVariables)
+                    || Object.values(environmentVariables).some((value) => typeof value !== 'string')
+                )) {
+                    throw new Error('Invalid provider readiness environmentVariables');
+                }
+                const environmentVariablesMode = params.environmentVariablesMode;
+                if (environmentVariablesMode !== undefined
+                    && environmentVariablesMode !== 'replace'
+                    && environmentVariablesMode !== 'overlay') {
+                    throw new Error('Invalid provider readiness environmentVariablesMode');
+                }
+                if (params.token !== undefined && typeof params.token !== 'string') {
+                    throw new Error('Invalid provider readiness token');
+                }
+                return providerReadiness({
+                    provider: 'claude',
+                    ...(environmentVariables ? { environmentVariables } : {}),
+                    ...(environmentVariablesMode ? { environmentVariablesMode } : {}),
+                    ...(params.token ? { token: params.token } : {}),
+                });
+            },
+            { execution: 'read-only' },
+        );
+
+        const spawnSessionHandler = async (params: any) => {
             const {
                 directory,
                 sessionId,
@@ -245,17 +355,42 @@ export class ApiMachineClient {
                 agent,
                 token,
                 environmentVariables,
+                environmentVariablesMode,
                 codexMcpServers,
                 codexUseBuiltInHappyMcp,
                 requiredTerminalProtocol,
             } = params || {};
-            logger.debug(`[API MACHINE] Spawning session with params: ${JSON.stringify(params)}`);
+            // Tokens and profile environment values are deliberately excluded.
+            // The machine RPC transport is encrypted, but local debug logs are
+            // not a safe place to persist provider credentials.
+            logger.debug('[API MACHINE] Spawning session', {
+                directory,
+                sessionId,
+                machineId,
+                approvedNewDirectoryCreation,
+                agent,
+                hasToken: typeof token === 'string' && token.length > 0,
+                environmentVariableKeys: isRecord(environmentVariables)
+                    ? Object.keys(environmentVariables)
+                    : [],
+                environmentVariablesMode: environmentVariablesMode ?? 'replace',
+                codexMcpServerNames: isRecord(codexMcpServers)
+                    ? Object.keys(codexMcpServers)
+                    : [],
+                codexUseBuiltInHappyMcp,
+                requiredTerminalProtocol,
+            });
 
             if (!directory) {
                 throw new Error('Directory is required');
             }
             if (requiredTerminalProtocol !== undefined && requiredTerminalProtocol !== 1) {
                 throw new Error('Unsupported requiredTerminalProtocol');
+            }
+            if (environmentVariablesMode !== undefined
+                && environmentVariablesMode !== 'replace'
+                && environmentVariablesMode !== 'overlay') {
+                throw new Error('Invalid environmentVariablesMode');
             }
 
             const result = await spawnSession({
@@ -266,6 +401,7 @@ export class ApiMachineClient {
                 agent,
                 token,
                 environmentVariables,
+                environmentVariablesMode,
                 codexMcpServers,
                 codexUseBuiltInHappyMcp,
                 requiredTerminalProtocol,
@@ -289,10 +425,32 @@ export class ApiMachineClient {
                 case 'error':
                     throw new Error(result.errorMessage);
             }
-        });
 
-        // Register stop session handler  
-        this.rpcHandlerManager.registerHandler('stop-session', (params: any) => {
+            throw new Error('Invalid daemon spawn-session result');
+        };
+        // Existing Happy clients do not yet ACK results, so their shared
+        // method retains the historical bounded replay horizon. Agent Plane
+        // uses a distinct method with an explicit authoritative ACK contract.
+        this.rpcHandlerManager.registerHandler('spawn-happy-session', spawnSessionHandler);
+        this.rpcHandlerManager.registerHandler(
+            'spawn-agent-plane-session',
+            async (params: any) => {
+                try {
+                    return await spawnSessionHandler(params);
+                } catch (error) {
+                    const message = boundedAgentPlaneRpcError(error);
+                    logger.debug(`[API MACHINE] Agent Plane session spawn rejected: ${message}`);
+                    return {
+                        type: 'spawn_rejected',
+                        error: message,
+                        retryable: true,
+                    };
+                }
+            },
+            { execution: 'durable-acknowledged' },
+        );
+
+        const requestSessionStop = (params: any): string => {
             const { sessionId } = params || {};
 
             if (!sessionId) {
@@ -305,18 +463,94 @@ export class ApiMachineClient {
             }
 
             logger.debug(`[API MACHINE] Stopped session ${sessionId}`);
+            return sessionId;
+        };
+        const stopSessionHandler = (params: any) => {
+            requestSessionStop(params);
             return { message: 'Session stopped' };
-        });
+        };
+        this.rpcHandlerManager.registerHandler('stop-session', stopSessionHandler);
+        this.rpcHandlerManager.registerHandler(
+            'stop-agent-plane-session',
+            async (params: any) => {
+                const { sessionId } = params || {};
+                const rejected = (
+                    reason: 'invalid_request' | 'stop_failed' | 'status_unavailable' | 'still_tracked',
+                    retryable: boolean,
+                ) => ({
+                    type: 'stop_rejected' as const,
+                    sessionId: typeof sessionId === 'string' ? sessionId : '',
+                    reason,
+                    retryable,
+                    stopRequestAccepted: false,
+                    trackingReleased: false,
+                    processExitConfirmed: false,
+                });
+                if (typeof sessionId !== 'string' || !sessionId) {
+                    return rejected('invalid_request', false);
+                }
 
-        this.rpcHandlerManager.registerHandler('session-status-list', async (params: any) => {
-            const sessionIds = Array.isArray(params?.sessionIds)
-                ? params.sessionIds.filter((item: unknown): item is string => typeof item === 'string' && item.length > 0)
-                : [];
-            return {
-                success: true,
-                sessions: await sessionStatusList(sessionIds),
-            };
-        });
+                let stopRequestAccepted: boolean;
+                try {
+                    stopRequestAccepted = stopSession(sessionId);
+                } catch (error) {
+                    logger.debug(`[API MACHINE] Session ${sessionId} stop request failed`, error);
+                    return rejected('stop_failed', true);
+                }
+                if (!stopRequestAccepted) {
+                    // A caller may be replaying a stable stop identity after
+                    // the child exited (or after daemon tracking was already
+                    // released). That is an idempotent success, but a still-
+                    // tracked child whose signal was rejected must remain a
+                    // retryable failure.
+                    let statuses: Awaited<ReturnType<typeof sessionStatusList>>;
+                    try {
+                        statuses = await sessionStatusList([sessionId]);
+                    } catch (error) {
+                        logger.debug(`[API MACHINE] Session ${sessionId} status check failed after rejected stop`, error);
+                        return rejected('status_unavailable', true);
+                    }
+                    if (!Array.isArray(statuses)) {
+                        return rejected('status_unavailable', true);
+                    }
+                    const status = statuses.find((entry) => entry.sessionId === sessionId)?.status
+                        ?? 'unknown';
+                    if (status !== 'unknown') {
+                        return rejected('still_tracked', true);
+                    }
+                    // Agent Plane's stop contract treats an already-absent
+                    // target as an accepted idempotent no-op. Returning false
+                    // would make its durable stop outbox reject and replay this
+                    // otherwise successful outcome forever.
+                    stopRequestAccepted = true;
+                    logger.debug(`[API MACHINE] Session ${sessionId} was already absent during idempotent stop replay`);
+                } else {
+                    logger.debug(`[API MACHINE] Stopped session ${sessionId}`);
+                }
+                return {
+                    type: 'stop_requested',
+                    sessionId,
+                    stopRequestAccepted,
+                    trackingReleased: true,
+                    processExitConfirmed: false,
+                };
+            },
+            { execution: 'durable-acknowledged' },
+        );
+
+        this.rpcHandlerManager.registerHandler(
+            'session-status-list',
+            async (params: any) => {
+                const sessionIds = Array.isArray(params?.sessionIds)
+                    ? params.sessionIds.filter((item: unknown): item is string => typeof item === 'string' && item.length > 0)
+                    : [];
+                return {
+                    success: true,
+                    sessions: await sessionStatusList(sessionIds),
+                };
+            },
+            { execution: 'read-only' },
+        );
 
         // Register stop daemon handler
         this.rpcHandlerManager.registerHandler('stop-daemon', () => {

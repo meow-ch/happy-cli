@@ -14,11 +14,17 @@ export type PrepareAgentPlaneSessionRequest = {
     files: PrepareAgentPlaneSessionFile[];
 };
 
-export type PrepareAgentPlaneSessionResponse = {
-    type: 'success';
-    directory: string;
-    filesWritten: number;
-};
+export type PrepareAgentPlaneSessionResponse =
+    | {
+        type: 'success';
+        directory: string;
+        filesWritten: number;
+    }
+    | {
+        type: 'prepare_rejected';
+        error: string;
+        retryable: true;
+    };
 
 // Keep this allowlist in sync with the Agent Plane secure session prep bundle.
 export const AGENT_PLANE_SESSION_ALLOWED_FILE_NAMES = [

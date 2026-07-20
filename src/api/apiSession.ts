@@ -65,6 +65,8 @@ export type ACPMessageData =
         reason?: string;
         is_error?: true;
         result?: string;
+        retryable?: boolean;
+        prompt_executed?: boolean;
       }
     | {
         type: 'turn_aborted';

@@ -42,7 +42,11 @@ function extractClaudePlanText(input: unknown): string {
     }
 }
 
-type ClaudeTurn = { id: string; terminalProtocol: 1 };
+type ClaudeTurn = {
+    id: string;
+    terminalProtocol: 1;
+    hookEventsVisible?: boolean;
+};
 type ClaudeTerminalEvent = Extract<ACPMessageData, {
     type: 'task_complete' | 'task_failed' | 'turn_aborted';
 }>;
@@ -52,6 +56,138 @@ const MAX_CLAUDE_TERMINAL_MESSAGE_CHARS = 3_000;
 const MAX_CLAUDE_TERMINAL_CODE_CHARS = 80;
 const SUCCESS_TERMINAL_REASONS = new Set(['success', 'completed', 'end_turn']);
 const INCOMPLETE_ASSISTANT_STOP_REASONS = new Set(['max_tokens', 'tool_use', 'pause_turn']);
+const CLAUDE_PROVIDER_AUTH_FAILURE_PATTERNS = [
+    /\binvalid authentication credentials\b/i,
+    /\b(?:anthropic|claude) authentication[_ -]?failed\b/i,
+    /\bauthentication[_ -]?failed (?:for|with) (?:anthropic|claude)\b/i,
+    /\bfailed to authenticate (?:with )?(?:anthropic|claude)\b/i,
+    /\binvalid (?:anthropic api key|x-api-key)\b/i,
+    /\bnot logged in to claude\b/i,
+    /\bclaude(?: code)? (?:is )?not logged in\b/i,
+    // Claude Code 2.1.212 emits this exact result text for a logged-out
+    // `--print --output-format stream-json` invocation. Keep it anchored so
+    // connector/tool prose cannot promote itself to machine-provider auth.
+    /^not logged in\s*·\s*please run \/login$/i,
+];
+const NON_PROVIDER_AUTH_CONTEXT_PATTERNS = [
+    /\bmcp\b/i,
+    /\btool(?:[_ -]?(?:call|result|server|search|use))?\b/i,
+    /\bplugin\b/i,
+    /\bconnector\b/i,
+    /\bre-?authori[sz](?:e|ation)\b/i,
+];
+const CLAUDE_HOOK_LIFECYCLE_SUBTYPES = new Set([
+    'hook_started',
+    'hook_progress',
+    'hook_response',
+]);
+const CLAUDE_USAGE_METADATA_STRING_FIELDS = new Set([
+    'service_tier',
+    'inference_geo',
+    'speed',
+]);
+const CLAUDE_USAGE_NUMERIC_CONTAINER_FIELDS = new Set([
+    'server_tool_use',
+    'cache_creation',
+]);
+
+function usageAttestsZeroWork(usage: unknown): boolean {
+    if (usage === undefined) return true;
+    if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return false;
+
+    for (const [key, value] of Object.entries(usage)) {
+        if (typeof value === 'number') {
+            if (!Number.isFinite(value) || value !== 0) return false;
+            continue;
+        }
+        if (CLAUDE_USAGE_METADATA_STRING_FIELDS.has(key)) {
+            if (typeof value !== 'string') return false;
+            continue;
+        }
+        if (key === 'iterations') {
+            if (!Array.isArray(value) || value.length !== 0) return false;
+            continue;
+        }
+        if (CLAUDE_USAGE_NUMERIC_CONTAINER_FIELDS.has(key)) {
+            if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+            if (!Object.values(value).every(
+                (nestedValue) => typeof nestedValue === 'number'
+                    && Number.isFinite(nestedValue)
+                    && nestedValue === 0,
+            )) return false;
+            continue;
+        }
+        // Unknown non-numeric fields cannot safely attest that no provider or
+        // server-tool work occurred.
+        return false;
+    }
+    return true;
+}
+
+function isClaudeTurnHookLifecycleMessage(message: SDKMessage): boolean {
+    if (message.type !== 'system'
+        || typeof message.subtype !== 'string'
+        || !CLAUDE_HOOK_LIFECYCLE_SUBTYPES.has(message.subtype)) {
+        return false;
+    }
+
+    // Claude emits SessionStart while establishing the process/session, before
+    // it submits the prompt. It is intentionally excluded. Every other hook
+    // lifecycle event is conservative evidence that local turn work began;
+    // missing/malformed hook_event fields therefore also fail closed.
+    return message.hook_event !== 'SessionStart';
+}
+
+function redactClaudeTerminalCredentials(value: string): string {
+    return value
+        .replace(/\bsk-(?:ant-)?[A-Za-z0-9_-]{10,}\b/g, 'sk-REDACTED')
+        .replace(/\bBearer\s+[A-Za-z0-9._-]{10,}\b/gi, 'Bearer REDACTED')
+        .replace(
+            /(["']?(?:api[_-]?key|auth[_-]?token|access[_-]?token|oauth[_-]?token)["']?\s*[:=]\s*["']?)[^\s,"'}]{8,}/gi,
+            '$1REDACTED',
+        );
+}
+
+function hasConvincingZeroWorkEvidence(
+    result: SDKResultMessage,
+    toolWorkObserved: boolean,
+    hookWorkObserved: boolean,
+    hookEventsVisible: boolean,
+): boolean {
+    if (toolWorkObserved || hookWorkObserved || !hookEventsVisible) return false;
+    const modelUsage = result.modelUsage;
+    return result.duration_api_ms === 0
+        && result.total_cost_usd === 0
+        && usageAttestsZeroWork(result.usage)
+        && !!modelUsage
+        && typeof modelUsage === 'object'
+        && !Array.isArray(modelUsage)
+        && Object.keys(modelUsage).length === 0;
+}
+
+function isClaudeAuthenticationFailure(
+    result: SDKResultMessage,
+    convincingZeroWork: boolean,
+): boolean {
+    // These fields are emitted by the Claude runtime itself and therefore do
+    // not depend on interpreting free-form assistant/tool output.
+    if (result.api_error_status === 401) return true;
+    if (result.error === 'authentication_failed') return true;
+
+    // Compatibility fallback for older Claude versions that omitted the
+    // structured status. Fail closed: it must be an API terminal with proof
+    // that no provider/tool work ran, and tool/connector auth errors are never
+    // promoted to machine-level Claude authentication failures.
+    if (result.terminal_reason !== 'api_error' || !convincingZeroWork) return false;
+    const diagnostic = [result.error, result.result]
+        .filter((value): value is string => typeof value === 'string')
+        .join('\n');
+    if (!diagnostic) return false;
+    if (NON_PROVIDER_AUTH_CONTEXT_PATTERNS.some((pattern) => pattern.test(diagnostic))) {
+        return false;
+    }
+    return CLAUDE_PROVIDER_AUTH_FAILURE_PATTERNS.some((pattern) => pattern.test(diagnostic));
+}
 
 function boundedTerminalText(value: unknown, maxChars: number): string | undefined {
     if (typeof value !== 'string') return undefined;
@@ -88,6 +224,9 @@ function normalizeClaudeResultTerminal(input: {
     terminalProtocol: 1;
     assistantStopReason?: string | null;
     pendingToolCallCount?: number;
+    toolWorkObserved?: boolean;
+    hookWorkObserved?: boolean;
+    hookEventsVisible?: boolean;
 }): ClaudeTerminalEvent {
     const subtype = boundedTerminalCode(input.result.subtype) ?? 'unknown';
     const providerReason = boundedTerminalCode(input.result.terminal_reason);
@@ -103,8 +242,11 @@ function normalizeClaudeResultTerminal(input: {
         || providerReasonFailed
         || stoppedIncomplete
         || (input.pendingToolCallCount ?? 0) > 0;
+    const rawResultText = input.result.result ?? input.result.error;
     const resultText = boundedTerminalText(
-        input.result.result ?? input.result.error,
+        typeof rawResultText === 'string'
+            ? redactClaudeTerminalCredentials(rawResultText)
+            : rawResultText,
         MAX_CLAUDE_TERMINAL_RESULT_CHARS,
     );
 
@@ -120,18 +262,33 @@ function normalizeClaudeResultTerminal(input: {
         };
     }
 
-    const reason = providerReasonFailed
-        ? providerReason
-        : stoppedIncomplete
-            ? stopReason
-            : subtype !== 'success'
-                ? subtype
-                : (input.pendingToolCallCount ?? 0) > 0
-                    ? 'pending_tool_calls'
-                    : input.result.is_error === true
-                        ? 'claude_result_error'
-                        : 'invalid_is_error';
-    const failureMessage = reason === 'max_tokens'
+    const convincingZeroWork = hasConvincingZeroWorkEvidence(
+        input.result,
+        input.toolWorkObserved === true || (input.pendingToolCallCount ?? 0) > 0,
+        input.hookWorkObserved === true,
+        input.hookEventsVisible === true,
+    );
+    const authenticationFailure = isClaudeAuthenticationFailure(
+        input.result,
+        convincingZeroWork,
+    );
+    const immediateAuthenticationRejection = authenticationFailure && convincingZeroWork;
+    const reason = authenticationFailure
+        ? 'authentication_required'
+        : providerReasonFailed
+            ? providerReason
+            : stoppedIncomplete
+                ? stopReason
+                : subtype !== 'success'
+                    ? subtype
+                    : (input.pendingToolCallCount ?? 0) > 0
+                        ? 'pending_tool_calls'
+                        : input.result.is_error === true
+                            ? 'claude_result_error'
+                            : 'invalid_is_error';
+    const failureMessage = reason === 'authentication_required'
+        ? 'Claude authentication is required on this machine. Run "claude auth login" locally, then retry this turn.'
+        : reason === 'max_tokens'
         ? 'Claude reached its output token limit before completing the turn.'
         : reason === 'pending_tool_calls'
             ? 'Claude ended while one or more tool calls were still unresolved.'
@@ -158,7 +315,16 @@ function normalizeClaudeResultTerminal(input: {
         // causal and stable so recovery/UI cannot mistake partial prose for
         // the reason the turn failed.
         message: failureMessage,
-        ...(resultText ? { result: resultText } : {}),
+        ...(authenticationFailure
+            ? {
+                retryable: immediateAuthenticationRejection,
+                prompt_executed: !immediateAuthenticationRejection,
+            }
+            : {}),
+        // Authentication payloads are intentionally omitted in full. Regex
+        // redaction is useful for ordinary diagnostics, but cannot prove that
+        // an arbitrary provider payload contains no credential material.
+        ...(!authenticationFailure && resultText ? { result: resultText } : {}),
     };
 }
 
@@ -217,6 +383,11 @@ export const __testClaudeRemoteLauncherInternals = {
     normalizeClaudeResultTerminal,
     normalizeClaudeExitTerminal,
     emitClaudeTerminalAfterToolCleanup,
+    isClaudeAuthenticationFailure,
+    hasConvincingZeroWorkEvidence,
+    redactClaudeTerminalCredentials,
+    isClaudeTurnHookLifecycleMessage,
+    usageAttestsZeroWork,
 };
 
 function formatUnexpectedClaudeExit(error: unknown): string {
@@ -342,10 +513,16 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     let emittedPlanToolCalls = new Set<string>();
     let ongoingToolCalls = new Map<string, { parentToolCallId: string | null }>();
     let lastAssistantStopReason: string | null = null;
+    let activeTurnToolWorkObserved = false;
+    let activeTurnHookWorkObserved = false;
     let activeClaudeTurn: ClaudeTurn | null = null;
     let fallbackTerminal: ClaudeTerminalEvent | null = null;
 
     function onMessage(message: SDKMessage) {
+
+        if (activeClaudeTurn && isClaudeTurnHookLifecycleMessage(message)) {
+            activeTurnHookWorkObserved = true;
+        }
 
         // Write to message log
         formatClaudeMessageForInk(message, messageBuffer);
@@ -387,6 +564,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             if (umessage.message.content && Array.isArray(umessage.message.content)) {
                 for (let c of umessage.message.content) {
                     if (c.type === 'tool_use') {
+                        activeTurnToolWorkObserved = true;
                         logger.debug('[remote]: detected tool use ' + c.id! + ' parent: ' + umessage.parent_tool_use_id);
                         ongoingToolCalls.set(c.id!, { parentToolCallId: umessage.parent_tool_use_id ?? null });
                     }
@@ -623,6 +801,8 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     onTurnStarted: (turn) => {
                         fallbackTerminal = null;
                         lastAssistantStopReason = null;
+                        activeTurnToolWorkObserved = false;
+                        activeTurnHookWorkObserved = false;
                         if (turn.terminalProtocol !== 1) {
                             activeClaudeTurn = null;
                             return;
@@ -630,6 +810,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         activeClaudeTurn = {
                             id: turn.id,
                             terminalProtocol: 1,
+                            hookEventsVisible: turn.hookEventsVisible === true,
                         };
                         session.client.sendAgentMessage('claude', {
                             type: 'task_started',
@@ -660,8 +841,13 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             terminalProtocol: turn.terminalProtocol,
                             assistantStopReason: lastAssistantStopReason,
                             pendingToolCallCount: pendingToolCalls.length,
+                            toolWorkObserved: activeTurnToolWorkObserved,
+                            hookWorkObserved: activeTurnHookWorkObserved,
+                            hookEventsVisible: turn.hookEventsVisible === true,
                         });
                         lastAssistantStopReason = null;
+                        activeTurnToolWorkObserved = false;
+                        activeTurnHookWorkObserved = false;
 
                         const isIdle = !pending && session.queue.size() === 0;
                         await emitClaudeTerminalAfterToolCleanup({

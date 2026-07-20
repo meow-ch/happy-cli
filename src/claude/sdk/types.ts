@@ -65,15 +65,24 @@ export interface SDKResultMessage extends SDKMessage {
         output_tokens: number
         cache_read_input_tokens?: number
         cache_creation_input_tokens?: number
+        server_tool_use?: Record<string, number>
+        service_tier?: string
+        cache_creation?: Record<string, number>
+        inference_geo?: string
+        iterations?: unknown[]
+        speed?: string
+        [key: string]: unknown
     }
     total_cost_usd: number
     duration_ms: number
     duration_api_ms: number
+    api_error_status?: number | null
     is_error: boolean
     session_id: string
     terminal_reason?: string
     stop_reason?: string | null
     error?: string
+    modelUsage?: Record<string, unknown>
 }
 
 export interface SDKControlResponse extends SDKMessage {
@@ -177,6 +186,8 @@ export interface QueryOptions {
     fallbackModel?: string
     strictMcpConfig?: boolean
     canCallTool?: CanCallToolCallback
+    /** Include hook lifecycle messages in stream-json output. */
+    includeHookEvents?: boolean
     /** Path to a settings JSON file to pass to Claude via --settings */
     settingsPath?: string
 }

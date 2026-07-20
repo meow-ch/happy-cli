@@ -22,12 +22,16 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
-import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import {
   CODEX_EXTERNAL_MCP_SERVERS_ENV,
   CODEX_USE_BUILTIN_HAPPY_MCP_ENV,
 } from '@/codex/codexMcpServers';
 import { getGlobalClaudeVersion, checkClaudeVersion } from '@/utils/claudeVersionCheck';
+import {
+  probeClaudeAuthReadiness,
+  type ProviderReadinessRequest,
+  type ProviderReadinessResponse,
+} from '@/claude/claudeAuthReadiness';
 import {
   DaemonSessionStatus,
   pidIsAlive,
@@ -42,6 +46,7 @@ import {
   daemonSessionLifecyclePolicyFromEnvironment,
   selectDaemonSessionsForExpiry,
 } from './sessionLifecycle';
+import { buildAgentEnvironment } from './agentEnvironment';
 
 const SESSION_WEBHOOK_TIMEOUT_MS = 15_000;
 
@@ -122,6 +127,23 @@ async function getProfileEnvironmentVariablesForAgent(
     return envVars;
   } catch (error) {
     logger.debug('[DAEMON RUN] Failed to get profile environment variables:', error);
+    return {};
+  }
+}
+
+async function getActiveProfileEnvironmentVariablesForAgent(
+  agentType: 'claude' | 'codex' | 'gemini',
+): Promise<Record<string, string>> {
+  try {
+    const settings = await readSettings();
+    if (!settings.activeProfileId) {
+      logger.debug('[DAEMON RUN] No CLI local active profile set');
+      return {};
+    }
+    logger.debug(`[DAEMON RUN] Loading CLI local active profile: ${settings.activeProfileId}`);
+    return getProfileEnvironmentVariablesForAgent(settings.activeProfileId, agentType);
+  } catch (error) {
+    logger.debug('[DAEMON RUN] Failed to load CLI local profile environment variables:', error);
     return {};
   }
 }
@@ -341,6 +363,28 @@ export async function startDaemon(): Promise<void> {
       };
     };
 
+    const providerReadiness = async (
+      request: ProviderReadinessRequest,
+    ): Promise<ProviderReadinessResponse> => {
+      const explicitAuthEnv: Record<string, string> = {};
+      if (request.token) {
+        explicitAuthEnv.CLAUDE_CODE_OAUTH_TOKEN = request.token;
+      }
+      // This is the same builder used immediately below for child processes,
+      // so the probe cannot accidentally inspect a different credential set.
+      const builtEnvironment = await buildAgentEnvironment({
+        agent: 'claude',
+        environmentVariables: request.environmentVariables,
+        environmentVariablesMode: request.environmentVariablesMode,
+        authenticationEnvironmentVariables: explicitAuthEnv,
+        loadLocalProfileEnvironment: getActiveProfileEnvironmentVariablesForAgent,
+        logExpansion: false,
+      });
+      return probeClaudeAuthReadiness({
+        env: builtEnvironment.effectiveEnvironment,
+      });
+    };
+
     // Handle webhook from happy session reporting itself
     const onHappySessionWebhook = (sessionId: string, sessionMetadata: Metadata) => {
       logger.debugLargeJson(`[DAEMON RUN] Session reported`, sessionMetadata);
@@ -434,7 +478,19 @@ export async function startDaemon(): Promise<void> {
 
     // Spawn a new session (sessionId reserved for future --resume functionality)
     const spawnSession = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
-      logger.debugLargeJson('[DAEMON RUN] Spawning session', options);
+      logger.debug('[DAEMON RUN] Spawning session', {
+        directory: options.directory,
+        sessionId: options.sessionId,
+        machineId: options.machineId,
+        approvedNewDirectoryCreation: options.approvedNewDirectoryCreation,
+        agent: options.agent,
+        hasToken: typeof options.token === 'string' && options.token.length > 0,
+        environmentVariableKeys: Object.keys(options.environmentVariables ?? {}),
+        environmentVariablesMode: options.environmentVariablesMode ?? 'replace',
+        codexMcpServerNames: Object.keys(options.codexMcpServers ?? {}),
+        codexUseBuiltInHappyMcp: options.codexUseBuiltInHappyMcp,
+        requiredTerminalProtocol: options.requiredTerminalProtocol,
+      });
 
       const protocolValidationError = validateRequiredTerminalProtocol(options);
       if (protocolValidationError) {
@@ -489,12 +545,8 @@ export async function startDaemon(): Promise<void> {
           }
         }
 
-        // Build environment variables with explicit precedence layers:
-        // Layer 1 (base): Authentication tokens - protected, cannot be overridden
-        // Layer 2 (middle): Profile environment variables - GUI profile OR CLI local profile
-        // Layer 3 (top): Auth tokens again to ensure they're never overridden
-
-        // Layer 1: Resolve authentication token if provided
+        // Resolve explicit authentication first; the shared environment
+        // builder applies it after local/request profile and runtime settings.
         const authEnv: Record<string, string> = {};
         if (options.token) {
           if (options.agent === 'codex') {
@@ -512,57 +564,28 @@ export async function startDaemon(): Promise<void> {
           }
         }
 
-        // Layer 2: Profile environment variables
-        // Priority: GUI-provided profile > CLI local active profile > none
-        let profileEnv: Record<string, string> = {};
-
-        if (options.environmentVariables && Object.keys(options.environmentVariables).length > 0) {
-          // GUI provided profile environment variables - highest priority for profile settings
-          profileEnv = options.environmentVariables;
-          logger.info(`[DAEMON RUN] Using GUI-provided profile environment variables (${Object.keys(profileEnv).length} vars)`);
-          logger.debug(`[DAEMON RUN] GUI profile env var keys: ${Object.keys(profileEnv).join(', ')}`);
-        } else {
-          // Fallback to CLI local active profile
-          try {
-            const settings = await readSettings();
-            if (settings.activeProfileId) {
-              logger.debug(`[DAEMON RUN] No GUI profile provided, loading CLI local active profile: ${settings.activeProfileId}`);
-
-              // Get profile environment variables filtered for agent compatibility
-              profileEnv = await getProfileEnvironmentVariablesForAgent(
-                settings.activeProfileId,
-                options.agent || 'claude'
-              );
-
-              logger.debug(`[DAEMON RUN] Loaded ${Object.keys(profileEnv).length} environment variables from CLI local profile for agent ${options.agent || 'claude'}`);
-              logger.debug(`[DAEMON RUN] CLI profile env var keys: ${Object.keys(profileEnv).join(', ')}`);
-            } else {
-              logger.debug('[DAEMON RUN] No CLI local active profile set');
-            }
-          } catch (error) {
-            logger.debug('[DAEMON RUN] Failed to load CLI local profile environment variables:', error);
-            // Continue without profile env vars - this is not a fatal error
-          }
-        }
-
+        const runtimeEnv: Record<string, string> = {};
         if (options.agent === 'codex' && options.codexMcpServers && Object.keys(options.codexMcpServers).length > 0) {
-          profileEnv[CODEX_EXTERNAL_MCP_SERVERS_ENV] = JSON.stringify(options.codexMcpServers);
+          runtimeEnv[CODEX_EXTERNAL_MCP_SERVERS_ENV] = JSON.stringify(options.codexMcpServers);
         }
         if (options.agent === 'codex' && options.codexUseBuiltInHappyMcp === false) {
-          profileEnv[CODEX_USE_BUILTIN_HAPPY_MCP_ENV] = '0';
+          runtimeEnv[CODEX_USE_BUILTIN_HAPPY_MCP_ENV] = '0';
         } else if (options.agent === 'codex' && options.codexUseBuiltInHappyMcp === true) {
-          profileEnv[CODEX_USE_BUILTIN_HAPPY_MCP_ENV] = '1';
+          runtimeEnv[CODEX_USE_BUILTIN_HAPPY_MCP_ENV] = '1';
         }
 
-        // Final merge: Profile vars first, then auth (auth takes precedence to protect authentication)
-        let extraEnv = { ...profileEnv, ...authEnv };
-        logger.debug(`[DAEMON RUN] Final environment variable keys (before expansion) (${Object.keys(extraEnv).length}): ${Object.keys(extraEnv).join(', ')}`);
-
-        // Expand ${VAR} references from daemon's process.env
-        // This ensures variable substitution works in both tmux and non-tmux modes
-        // Example: ANTHROPIC_AUTH_TOKEN="${Z_AI_AUTH_TOKEN}" → ANTHROPIC_AUTH_TOKEN="sk-real-key"
-        extraEnv = expandEnvironmentVariables(extraEnv, process.env);
-        logger.debug(`[DAEMON RUN] After variable expansion: ${Object.keys(extraEnv).join(', ')}`);
+        const agent = options.agent ?? 'claude';
+        const builtEnvironment = await buildAgentEnvironment({
+          agent,
+          environmentVariables: options.environmentVariables,
+          environmentVariablesMode: options.environmentVariablesMode,
+          runtimeEnvironmentVariables: runtimeEnv,
+          authenticationEnvironmentVariables: authEnv,
+          loadLocalProfileEnvironment: getActiveProfileEnvironmentVariablesForAgent,
+        });
+        const extraEnv = builtEnvironment.extraEnvironmentVariables;
+        logger.debug(`[DAEMON RUN] Effective profile source: ${builtEnvironment.profileSource}`);
+        logger.debug(`[DAEMON RUN] Final environment variable keys (${Object.keys(extraEnv).length}): ${Object.keys(extraEnv).join(', ')}`);
 
         if (options.agent === 'codex') {
           await prepareIsolatedCodexHome(extraEnv);
@@ -842,21 +865,37 @@ export async function startDaemon(): Promise<void> {
         if (session.happySessionId === sessionId ||
           (sessionId.startsWith('PID-') && pid === parseInt(sessionId.replace('PID-', '')))) {
 
+          let stopRequestAccepted = false;
           if (session.startedBy === 'daemon' && session.childProcess) {
             try {
-              session.childProcess.kill('SIGTERM');
-              logger.debug(`[DAEMON RUN] Sent SIGTERM to daemon-spawned session ${sessionId}`);
+              stopRequestAccepted = session.childProcess.kill('SIGTERM')
+                || session.childProcess.exitCode !== null;
+              logger.debug(`[DAEMON RUN] SIGTERM request for daemon-spawned session ${sessionId}: ${stopRequestAccepted ? 'accepted' : 'rejected'}`);
             } catch (error) {
+              stopRequestAccepted = typeof error === 'object'
+                && error !== null
+                && 'code' in error
+                && error.code === 'ESRCH';
               logger.debug(`[DAEMON RUN] Failed to kill session ${sessionId}:`, error);
             }
           } else {
             // For externally started sessions, try to kill by PID
             try {
               process.kill(pid, 'SIGTERM');
+              stopRequestAccepted = true;
               logger.debug(`[DAEMON RUN] Sent SIGTERM to external session PID ${pid}`);
             } catch (error) {
+              stopRequestAccepted = typeof error === 'object'
+                && error !== null
+                && 'code' in error
+                && error.code === 'ESRCH';
               logger.debug(`[DAEMON RUN] Failed to kill external session PID ${pid}:`, error);
             }
+          }
+
+          if (!stopRequestAccepted) {
+            logger.debug(`[DAEMON RUN] Keeping session ${sessionId} tracked because its stop request was not accepted`);
+            return false;
           }
 
           pidToTrackedSession.delete(pid);
@@ -964,6 +1003,7 @@ export async function startDaemon(): Promise<void> {
       spawnSession,
       stopSession,
       sessionStatusList,
+      providerReadiness,
       requestShutdown: () => requestShutdown('happy-app')
     });
 

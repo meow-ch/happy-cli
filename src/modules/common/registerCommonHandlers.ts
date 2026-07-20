@@ -182,9 +182,16 @@ export interface SpawnSessionOptions {
     codexMcpServers?: Record<string, unknown>;
     codexUseBuiltInHappyMcp?: boolean;
     environmentVariables?: Record<string, string>;
+    /**
+     * `replace` preserves the legacy behavior for a non-empty RPC environment.
+     * `overlay` adds RPC variables on top of the daemon's active local profile.
+     */
+    environmentVariablesMode?: EnvironmentVariablesMode;
     /** Fail spawn unless the exact child session attests this terminal protocol. */
     requiredTerminalProtocol?: 1;
 }
+
+export type EnvironmentVariablesMode = 'replace' | 'overlay';
 
 export type SpawnSessionResult =
     | { type: 'success'; sessionId: string; terminalProtocol?: 1 }
@@ -399,7 +406,7 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
             logger.debug('Failed to read file:', error);
             return { success: false, error: error instanceof Error ? error.message : 'Failed to read file' };
         }
-    });
+    }, { execution: 'read-only' });
 
     // Write file handler - with hash verification
     rpcHandlerManager.registerHandler<WriteFileRequest, WriteFileResponse>('writeFile', async (data) => {
@@ -523,7 +530,7 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
             logger.debug('Failed to list directory:', error);
             return { success: false, error: error instanceof Error ? error.message : 'Failed to list directory' };
         }
-    });
+    }, { execution: 'read-only' });
 
     // Get directory tree handler - recursive with depth control
     rpcHandlerManager.registerHandler<GetDirectoryTreeRequest, GetDirectoryTreeResponse>('getDirectoryTree', async (data) => {
@@ -610,7 +617,7 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
             logger.debug('Failed to get directory tree:', error);
             return { success: false, error: error instanceof Error ? error.message : 'Failed to get directory tree' };
         }
-    });
+    }, { execution: 'read-only' });
 
     // Ripgrep handler - raw interface to ripgrep
     rpcHandlerManager.registerHandler<RipgrepRequest, RipgrepResponse>('ripgrep', async (data) => {
@@ -679,7 +686,7 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
         } catch (error) {
             return { success: false, error: error instanceof Error ? error.message : 'Failed to list Codex models' };
         }
-    });
+    }, { execution: 'read-only' });
 
     // Claude models list handler - gateway discovery plus Claude Code alias fallback.
     rpcHandlerManager.registerHandler<ClaudeModelsListRequest, ClaudeModelsListResponse>('claude-models-list', async (data) => {
@@ -690,7 +697,7 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
         } catch (error) {
             return { success: false, error: error instanceof Error ? error.message : 'Failed to list Claude models' };
         }
-    });
+    }, { execution: 'read-only' });
 
     rpcHandlerManager.registerHandler<AgentCapabilitiesListRequest, AgentCapabilitiesListResponse>('agent-capabilities-list', async (data) => {
         try {
@@ -706,5 +713,5 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
         } catch (error) {
             return { success: false, error: error instanceof Error ? error.message : 'Failed to list agent capabilities' };
         }
-    });
+    }, { execution: 'read-only' });
 }

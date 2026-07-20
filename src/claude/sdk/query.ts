@@ -274,6 +274,7 @@ export function query(config: {
             fallbackModel,
             strictMcpConfig,
             canCallTool,
+            includeHookEvents,
             settingsPath
         } = {}
     } = config
@@ -285,6 +286,8 @@ export function query(config: {
 
     // Build command arguments
     const args = ['--output-format', 'stream-json', '--verbose']
+
+    if (includeHookEvents) args.push('--include-hook-events')
 
     if (customSystemPrompt) args.push('--system-prompt', customSystemPrompt)
     if (appendSystemPrompt) args.push('--append-system-prompt', appendSystemPrompt)

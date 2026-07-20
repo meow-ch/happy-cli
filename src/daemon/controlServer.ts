@@ -140,6 +140,7 @@ export function startDaemonControlServer({
           // claude, preserving the previous behavior for existing callers.
           agent: z.enum(['claude', 'codex', 'gemini']).optional(),
           environmentVariables: z.record(z.string(), z.string()).optional(),
+          environmentVariablesMode: z.enum(['replace', 'overlay']).optional(),
           codexMcpServers: z.record(z.string(), z.unknown()).optional(),
           codexUseBuiltInHappyMcp: z.boolean().optional(),
           requiredTerminalProtocol: z.literal(1).optional(),
@@ -169,6 +170,7 @@ export function startDaemonControlServer({
         sessionId,
         agent,
         environmentVariables,
+        environmentVariablesMode,
         codexMcpServers,
         codexUseBuiltInHappyMcp,
         requiredTerminalProtocol,
@@ -180,6 +182,7 @@ export function startDaemonControlServer({
         sessionId,
         agent,
         environmentVariables,
+        environmentVariablesMode,
         codexMcpServers,
         codexUseBuiltInHappyMcp,
         requiredTerminalProtocol,

@@ -13,15 +13,28 @@ import { systemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import type { JsRuntime } from "./runClaude";
 import { randomUUID } from 'node:crypto';
+import { sanitizeClaudeMessageForLogging } from './sdk/sanitizeMessageForLogging';
 
-type ClaudeRemoteTurn = { id: string; terminalProtocol?: 1 };
+type ClaudeRemoteTurn = {
+    id: string;
+    terminalProtocol?: 1;
+    hookEventsVisible?: true;
+};
 
-function createClaudeTurn(mode: EnhancedMode): ClaudeRemoteTurn {
+function createClaudeTurn(
+    mode: EnhancedMode,
+    hookEventsVisible = false,
+): ClaudeRemoteTurn {
     return {
         // Canonical inbox delivery injects SessionMessage.localId here. The
         // random fallback is only for legacy rows which have no durable id.
         id: mode.promptLocalId || randomUUID(),
-        ...(mode.terminalProtocol === 1 ? { terminalProtocol: 1 as const } : {}),
+        ...(mode.terminalProtocol === 1
+            ? {
+                terminalProtocol: 1 as const,
+                ...(hookEventsVisible ? { hookEventsVisible: true as const } : {}),
+            }
+            : {}),
     };
 }
 
@@ -163,7 +176,12 @@ export async function claudeRemote(opts: {
     if (!initial) { // No initial message - exit
         return;
     }
-    let activeTurn = createClaudeTurn(initial.mode);
+    // Protocol-v1 retry decisions require positive visibility into local hook
+    // execution. A legacy invocation intentionally keeps its historical CLI
+    // surface. Protocol-v1 prompts are isolated by promptLocalId, so a query
+    // process cannot silently switch from legacy to v1 midway through.
+    const includeHookEvents = initial.mode.terminalProtocol === 1;
+    let activeTurn = createClaudeTurn(initial.mode, includeHookEvents);
 
     // Handle special commands
     const specialCommand = parseSpecialCommand(initial.message);
@@ -218,6 +236,7 @@ export async function claudeRemote(opts: {
             return resolve(join(projectPath(), 'scripts', 'claude_remote_launcher.cjs'));
         })(),
         settingsPath: opts.hookSettingsPath,
+        includeHookEvents,
     }
 
     // Track thinking state
@@ -258,7 +277,10 @@ export async function claudeRemote(opts: {
         logger.debug(`[claudeRemote] Starting to iterate over response`);
 
         for await (const message of response) {
-            logger.debugLargeJson(`[claudeRemote] Message ${message.type}`, message);
+            logger.debugLargeJson(
+                `[claudeRemote] Message ${message.type}`,
+                sanitizeClaudeMessageForLogging(message),
+            );
 
             // Handle messages
             opts.onMessage(message);
@@ -307,7 +329,7 @@ export async function claudeRemote(opts: {
                     return;
                 }
                 mode = next.mode;
-                activeTurn = createClaudeTurn(next.mode);
+                activeTurn = createClaudeTurn(next.mode, includeHookEvents);
                 await opts.onTurnStarted(activeTurn);
                 messages.push({ type: 'user', message: { role: 'user', content: buildMessageContent(next.message, next.mode.images) } });
             }

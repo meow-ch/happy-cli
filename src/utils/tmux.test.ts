@@ -5,7 +5,7 @@
  * They do NOT require tmux to be installed on the system.
  * All tests mock environment variables and test string parsing only.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
     parseTmuxSessionIdentifier,
     formatTmuxSessionIdentifier,
@@ -15,6 +15,7 @@ import {
     TmuxUtilities,
     type TmuxSessionIdentifier,
 } from './tmux';
+import { logger } from '@/ui/logger';
 
 describe('parseTmuxSessionIdentifier', () => {
     it('should parse session-only identifier', () => {
@@ -417,6 +418,80 @@ describe('TmuxUtilities.detectTmuxEnvironment', () => {
                 socket_path: '/tmp/tmux-1000/default'
             });
         });
+    });
+});
+
+describe('TmuxUtilities.spawnInTmux', () => {
+    it('passes environment values to tmux exactly without shell quoting or escaping', async () => {
+        const utils = new TmuxUtilities('review');
+        const calls: string[][] = [];
+        vi.spyOn(utils, 'executeTmuxCommand').mockImplementation(async (command) => {
+            calls.push(command);
+            return {
+                returncode: 0,
+                stdout: command[0] === 'new-window' ? '123\n' : '',
+                stderr: '',
+                command,
+            };
+        });
+        const rawValue = 'token with "$`\\ and = chars';
+
+        await expect(utils.spawnInTmux(
+            ['node', 'app.js'],
+            {
+                sessionName: 'review',
+                windowName: 'worker',
+                cwd: '/tmp',
+            },
+            { CLAUDE_CODE_OAUTH_TOKEN: rawValue },
+        )).resolves.toMatchObject({
+            success: true,
+            sessionId: 'review:worker',
+            pid: 123,
+        });
+
+        const createWindow = calls.find((command) => command[0] === 'new-window');
+        expect(createWindow).toBeDefined();
+        const environmentFlag = createWindow!.indexOf('-e');
+        expect(environmentFlag).toBeGreaterThan(-1);
+        expect(createWindow![environmentFlag + 1])
+            .toBe(`CLAUDE_CODE_OAUTH_TOKEN=${rawValue}`);
+    });
+
+    it('never logs credential-bearing spawnargs when the tmux subprocess fails', async () => {
+        const utils = new TmuxUtilities('review');
+        const secret = 'sk-ant-never-log-this-spawn-secret';
+        const spawnError = Object.assign(
+            new Error(`spawn tmux failed with ${secret}`),
+            {
+                code: 'ENOENT',
+                spawnargs: ['new-window', '-e', `CLAUDE_CODE_OAUTH_TOKEN=${secret}`],
+            },
+        );
+        vi.spyOn(utils as any, 'runCommand').mockRejectedValue(spawnError);
+        const debug = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+
+        try {
+            await expect(utils.spawnInTmux(
+                ['node', 'app.js'],
+                { sessionName: 'review' },
+                { CLAUDE_CODE_OAUTH_TOKEN: secret },
+            )).resolves.toEqual({
+                success: false,
+                error: 'Failed to spawn in tmux',
+            });
+
+            expect(debug).toHaveBeenCalledWith('[TMUX] Command execution failed', {
+                error: 'tmux_subprocess_failed',
+                code: 'ENOENT',
+            });
+            expect(debug).toHaveBeenCalledWith('[TMUX] Failed to spawn in tmux', {
+                error: 'tmux_spawn_failed',
+            });
+            expect(JSON.stringify(debug.mock.calls)).not.toContain(secret);
+        } finally {
+            debug.mockRestore();
+        }
     });
 });
 

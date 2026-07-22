@@ -15,7 +15,21 @@ import { calculateCost } from '@/utils/pricing';
 import { resolveUserMessageImageReferences } from './imageReferences';
 import { SessionEndOutboxRecord, SessionMessageOutbox, SessionMessageOutboxOptions, SessionMessageOutboxRecord } from './sessionMessageOutbox';
 import { notifyDaemonSessionActivity } from '@/daemon/controlClient';
-import { SessionMessageInbox } from './sessionMessageInbox';
+import {
+    SessionMessageInbox,
+    type SessionMessageInboxReconcileResult,
+} from './sessionMessageInbox';
+import {
+    boundedRetryDelay,
+    DEFAULT_INBOX_MAX_PAGES_PER_RECONCILE,
+    DEFAULT_INBOX_PERIODIC_JITTER_MS,
+    DEFAULT_INBOX_RECONCILE_INTERVAL_MS,
+    DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
+    DEFAULT_RECONNECT_RECOVERY_JITTER_MS,
+    nonNegativeInteger,
+    positiveInteger,
+    reconnectRecoveryDelay,
+} from './sessionTransportPolicy';
 
 /**
  * ACP (Agent Communication Protocol) message data types.
@@ -89,9 +103,14 @@ export interface ApiSessionClientOptions {
     messageAckTimeoutMs?: number;
     outboxRetryBaseMs?: number;
     outboxRetryMaxMs?: number;
+    outboxDrainBatchSize?: number;
+    reconnectRecoveryJitterMs?: number;
+    random?: () => number;
     inbox?: {
         fetchPage?: (afterSeq: number) => Promise<SessionMessageReplayPage>;
         reconcileIntervalMs?: number;
+        periodicJitterMs?: number;
+        maxPagesPerReconcile?: number;
         retryBaseMs?: number;
         retryMaxMs?: number;
     };
@@ -118,6 +137,9 @@ export class ApiSessionClient extends EventEmitter {
     private readonly messageAckTimeoutMs: number;
     private readonly outboxRetryBaseMs: number;
     private readonly outboxRetryMaxMs: number;
+    private readonly outboxDrainBatchSize: number;
+    private readonly reconnectRecoveryJitterMs: number;
+    private readonly random: () => number;
     private readonly sessionInstanceId = randomUUID();
     private outboxDrainPromise: Promise<void> | null = null;
     private outboxRetryTimer: NodeJS.Timeout | null = null;
@@ -133,11 +155,13 @@ export class ApiSessionClient extends EventEmitter {
     private readonly inboxReconcileIntervalMs: number;
     private readonly inboxRetryBaseMs: number;
     private readonly inboxRetryMaxMs: number;
-    private inboxReconcilePromise: Promise<void> | null = null;
+    private readonly inboxPeriodicJitterMs: number;
+    private inboxReconcilePromise: Promise<SessionMessageInboxReconcileResult> | null = null;
     private inboxRetryTimer: NodeJS.Timeout | null = null;
     private inboxPeriodicTimer: NodeJS.Timeout | null = null;
     private inboxRetryAttempt = 0;
     private readonly ownMessageCiphertextByLocalId = new Map<string, string>();
+    private connectedOnce = false;
 
     constructor(token: string, session: Session, options: ApiSessionClientOptions = {}) {
         super()
@@ -155,6 +179,15 @@ export class ApiSessionClient extends EventEmitter {
             ?? Number(process.env.HAPPY_MESSAGE_ACK_TIMEOUT_MS || 15_000);
         this.outboxRetryBaseMs = options.outboxRetryBaseMs ?? 1_000;
         this.outboxRetryMaxMs = options.outboxRetryMaxMs ?? 60_000;
+        this.outboxDrainBatchSize = positiveInteger(
+            options.outboxDrainBatchSize,
+            DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
+        );
+        this.reconnectRecoveryJitterMs = nonNegativeInteger(
+            options.reconnectRecoveryJitterMs,
+            DEFAULT_RECONNECT_RECOVERY_JITTER_MS,
+        );
+        this.random = options.random ?? Math.random;
         for (const record of this.outbox.pendingRecords()) {
             this.ownMessageCiphertextByLocalId.set(record.localId, record.message);
         }
@@ -175,8 +208,17 @@ export class ApiSessionClient extends EventEmitter {
             initialAfterSeq: session.seq,
             fetchPage,
             deliver: (message) => this.deliverStoredSessionMessage(message),
+            maxPagesPerReconcile: positiveInteger(
+                options.inbox?.maxPagesPerReconcile,
+                DEFAULT_INBOX_MAX_PAGES_PER_RECONCILE,
+            ),
         });
-        this.inboxReconcileIntervalMs = options.inbox?.reconcileIntervalMs ?? 3_000;
+        this.inboxReconcileIntervalMs = options.inbox?.reconcileIntervalMs
+            ?? DEFAULT_INBOX_RECONCILE_INTERVAL_MS;
+        this.inboxPeriodicJitterMs = nonNegativeInteger(
+            options.inbox?.periodicJitterMs,
+            DEFAULT_INBOX_PERIODIC_JITTER_MS,
+        );
         this.inboxRetryBaseMs = options.inbox?.retryBaseMs ?? 1_000;
         this.inboxRetryMaxMs = options.inbox?.retryMaxMs ?? 30_000;
 
@@ -218,14 +260,18 @@ export class ApiSessionClient extends EventEmitter {
         this.socket.on('connect', () => {
             logger.debug('Socket connected successfully');
             this.rpcHandlerManager.onSocketConnect(this.socket);
+            const recoveryDelay = this.connectedOnce
+                ? reconnectRecoveryDelay(this.reconnectRecoveryJitterMs, this.random)
+                : 0;
+            this.connectedOnce = true;
             this.outboxRetryAttempt = 0;
             if (this.outboxRetryTimer) {
                 clearTimeout(this.outboxRetryTimer);
                 this.outboxRetryTimer = null;
             }
-            this.scheduleOutboxDrain(0);
+            this.scheduleOutboxDrain(recoveryDelay);
             this.startInboxPeriodicReconciliation();
-            this.scheduleInboxReconciliation(0);
+            this.scheduleInboxReconciliation(recoveryDelay);
         })
 
         // Set up global RPC request handler
@@ -597,15 +643,19 @@ export class ApiSessionClient extends EventEmitter {
 
     private startInboxPeriodicReconciliation(): void {
         if (this.inboxPeriodicTimer || this.inboxReconcileIntervalMs <= 0) return;
-        this.inboxPeriodicTimer = setInterval(() => {
+        const delay = this.inboxReconcileIntervalMs
+            + reconnectRecoveryDelay(this.inboxPeriodicJitterMs, this.random);
+        this.inboxPeriodicTimer = setTimeout(() => {
+            this.inboxPeriodicTimer = null;
             this.scheduleInboxReconciliation(0);
-        }, this.inboxReconcileIntervalMs);
+            this.startInboxPeriodicReconciliation();
+        }, delay);
         this.inboxPeriodicTimer.unref?.();
     }
 
     private stopInboxReconciliationTimers(): void {
         if (this.inboxRetryTimer) clearTimeout(this.inboxRetryTimer);
-        if (this.inboxPeriodicTimer) clearInterval(this.inboxPeriodicTimer);
+        if (this.inboxPeriodicTimer) clearTimeout(this.inboxPeriodicTimer);
         this.inboxRetryTimer = null;
         this.inboxPeriodicTimer = null;
     }
@@ -616,7 +666,7 @@ export class ApiSessionClient extends EventEmitter {
             clearTimeout(this.inboxRetryTimer);
             this.inboxRetryTimer = null;
         }
-        if (this.inboxReconcilePromise) {
+        if (this.inboxReconcilePromise && delayMs === 0) {
             // Mark another pass requested; SessionMessageInbox coalesces it into
             // the existing serialized worker.
             void this.inbox.reconcile();
@@ -635,14 +685,23 @@ export class ApiSessionClient extends EventEmitter {
         const work = this.inbox.reconcile();
         this.inboxReconcilePromise = work;
         let retryDelay: number | null = null;
-        void work.then(() => {
+        void work.then((result) => {
             this.inboxRetryAttempt = 0;
+            if (result.hasMore) {
+                retryDelay = boundedRetryDelay(
+                    0,
+                    this.inboxRetryBaseMs,
+                    this.inboxRetryMaxMs,
+                    this.random,
+                );
+            }
         }, (error) => {
-            const ceiling = Math.min(
+            retryDelay = boundedRetryDelay(
+                this.inboxRetryAttempt++,
+                this.inboxRetryBaseMs,
                 this.inboxRetryMaxMs,
-                this.inboxRetryBaseMs * (2 ** Math.min(this.inboxRetryAttempt++, 16)),
+                this.random,
             );
-            retryDelay = Math.floor(Math.random() * (ceiling + 1));
             logger.debug('[INBOX] Canonical session message reconciliation paused', {
                 sessionId: this.sessionId,
                 afterSeq: this.inbox.afterSeq,
@@ -775,26 +834,32 @@ export class ApiSessionClient extends EventEmitter {
                     && !this.outboxBlockedByPermanentError
                     && this.socket.connected
                     && this.outbox.pendingCount > 0) {
-                    const ceiling = Math.min(
+                    const retryDelay = boundedRetryDelay(
+                        this.outboxRetryAttempt++,
+                        this.outboxRetryBaseMs,
                         this.outboxRetryMaxMs,
-                        this.outboxRetryBaseMs * (2 ** Math.min(this.outboxRetryAttempt++, 16)),
+                        this.random,
                     );
-                    // Full jitter prevents all daemon sessions reconnecting together.
-                    this.scheduleOutboxDrain(Math.floor(Math.random() * (ceiling + 1)));
+                    this.scheduleOutboxDrain(retryDelay);
                 }
             });
     }
 
     private async drainOutbox(): Promise<void> {
-        while (!this.closed && this.socket.connected) {
+        let attemptedRecords = 0;
+        while (!this.closed
+            && this.socket.connected
+            && attemptedRecords < this.outboxDrainBatchSize) {
             const record = this.outbox.pendingRecords()[0];
             if (record) {
+                attemptedRecords += 1;
                 const acknowledged = await this.deliverOutboxRecord(record);
                 if (!acknowledged) return;
                 continue;
             }
             const sessionEnd = this.outbox.pendingSessionEnd();
             if (!sessionEnd) return;
+            attemptedRecords += 1;
             const acknowledged = await this.deliverSessionEnd(sessionEnd);
             if (!acknowledged) return;
         }

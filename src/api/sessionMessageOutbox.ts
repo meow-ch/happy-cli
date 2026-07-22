@@ -77,6 +77,14 @@ export function defaultSessionMessageOutboxRoot(): string {
   return join(configuration.happyHomeDir, 'session-message-outbox');
 }
 
+export interface SessionMessageOutboxDiskInspection {
+  sessionId: string;
+  directoryExists: boolean;
+  safeToTerminate: boolean;
+  managedFileCount: number;
+  reason: 'empty' | 'managed-records-present' | 'inspection-failed';
+}
+
 function isManifestFilename(filename: string): boolean {
   return filename === MANIFEST_FILENAME || filename.startsWith(`${MANIFEST_FILENAME}.`);
 }
@@ -130,6 +138,47 @@ export function discoverPendingSessionOutboxSessionIds(
 
 function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+/**
+ * Read-only termination guard. Unlike constructing SessionMessageOutbox this
+ * never creates a manifest or repairs files, making daemon prune dry-runs
+ * genuinely side-effect free.
+ */
+export function inspectSessionMessageOutboxOnDisk(
+  sessionId: string,
+  rootDirectory = defaultSessionMessageOutboxRoot(),
+): SessionMessageOutboxDiskInspection {
+  const directory = join(rootDirectory, digest(sessionId));
+  if (!existsSync(directory)) {
+    return {
+      sessionId,
+      directoryExists: false,
+      safeToTerminate: true,
+      managedFileCount: 0,
+      reason: 'empty',
+    };
+  }
+  try {
+    const managedFileCount = readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => !entry.isFile() || !isManifestFilename(entry.name))
+      .length;
+    return {
+      sessionId,
+      directoryExists: true,
+      safeToTerminate: managedFileCount === 0,
+      managedFileCount,
+      reason: managedFileCount === 0 ? 'empty' : 'managed-records-present',
+    };
+  } catch {
+    return {
+      sessionId,
+      directoryExists: true,
+      safeToTerminate: false,
+      managedFileCount: 0,
+      reason: 'inspection-failed',
+    };
+  }
 }
 
 function isOutboxManifest(value: unknown): value is SessionMessageOutboxManifest {

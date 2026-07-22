@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   discoverPendingSessionOutboxSessionIds,
+  inspectSessionMessageOutboxOnDisk,
   SessionMessageOutbox,
 } from './sessionMessageOutbox';
 
@@ -102,6 +103,33 @@ describe('SessionMessageOutbox', () => {
 
     expect(discoverPendingSessionOutboxSessionIds(rootDirectory))
       .toEqual(['session-orphan-a', 'session-orphan-b']);
+  });
+
+  it('inspects prune safety without creating or repairing an outbox', () => {
+    const rootDirectory = createRoot();
+    const absent = inspectSessionMessageOutboxOnDisk('never-created', rootDirectory);
+    expect(absent).toEqual(expect.objectContaining({
+      directoryExists: false,
+      safeToTerminate: true,
+      managedFileCount: 0,
+    }));
+    expect(readdirSync(rootDirectory)).toEqual([]);
+
+    const outbox = new SessionMessageOutbox('pending-prune', { rootDirectory });
+    outbox.enqueue('encrypted-result', 'pending-id');
+    expect(inspectSessionMessageOutboxOnDisk('pending-prune', rootDirectory))
+      .toEqual(expect.objectContaining({
+        directoryExists: true,
+        safeToTerminate: false,
+        managedFileCount: 1,
+        reason: 'managed-records-present',
+      }));
+    outbox.acknowledge('pending-id');
+    expect(inspectSessionMessageOutboxOnDisk('pending-prune', rootDirectory))
+      .toEqual(expect.objectContaining({
+        safeToTerminate: true,
+        managedFileCount: 0,
+      }));
   });
 
   it('attributes malformed-only directories and blocks later records from replay', () => {

@@ -38,6 +38,17 @@ import {
 } from './codexMcpServers';
 import { resolveCodexExecutionPolicy } from './executionPolicy';
 import { formatGoalCommand, parseSpecialCommand } from '@/parsers/specialCommands';
+import { notifyDaemonSessionStarted } from "@/daemon/controlClient";
+import { startSessionHeartbeat } from '@/api/sessionHeartbeat';
+import { registerKillSessionHandler } from "@/claude/registerKillSessionHandler";
+import { delay } from "@/utils/time";
+import { onceAsync } from '@/utils/onceAsync';
+import { stopCaffeinate } from "@/utils/caffeinate";
+import { connectionState } from '@/utils/serverConnectionErrors';
+import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
+import type { ApiSessionClient } from '@/api/apiSession';
+import type { AgentPlanDecision } from '@/api/types';
+
 // Codex does not support the Gemini-style `functions.happy__change_title` instruction.
 // It can, however, call MCP tools exposed via `mcp_servers` (see `mcpServers` below).
 const CODEX_CHANGE_TITLE_INSTRUCTION = [
@@ -48,14 +59,6 @@ const CODEX_CHANGE_TITLE_INSTRUCTION = [
     'Call the MCP tool `mcp__happy__change__title` (or `mcp__happy__change_title` if that is what you see) with JSON: {"title": "<new title>"}',
     'If the task changes significantly, call it again to update the title.',
 ].join(' ');
-import { notifyDaemonSessionStarted } from "@/daemon/controlClient";
-import { registerKillSessionHandler } from "@/claude/registerKillSessionHandler";
-import { delay } from "@/utils/time";
-import { stopCaffeinate } from "@/utils/caffeinate";
-import { connectionState } from '@/utils/serverConnectionErrors';
-import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
-import type { ApiSessionClient } from '@/api/apiSession';
-import type { AgentPlanDecision } from '@/api/types';
 
 type ReadyEventOptions = {
     pending: unknown;
@@ -450,11 +453,10 @@ export async function runCodex(opts: {
         }
     });
     let thinking = false;
-    session.keepAlive(thinking, 'remote');
     // Periodic keep-alive; store handle so we can clear on exit
-    const keepAliveInterval = setInterval(() => {
+    const keepAliveInterval = startSessionHeartbeat(() => {
         session.keepAlive(thinking, 'remote');
-    }, 2000);
+    });
 
     const sendReady = () => {
         session.sendSessionEvent({ type: 'ready' });
@@ -528,7 +530,7 @@ export async function runCodex(opts: {
      * Abort stops the current inference but keeps the session alive.
      * Kill terminates the entire process.
      */
-    const handleKillSession = async () => {
+    const handleKillSession = onceAsync(async () => {
         logger.debug('[Codex] Kill session requested - terminating process');
         await handleAbort();
         logger.debug('[Codex] Abort completed, proceeding with termination');
@@ -569,7 +571,13 @@ export async function runCodex(opts: {
             logger.debug('[Codex] Error during session termination:', error);
             process.exit(1);
         }
+    });
+
+    const handleTerminationSignal = () => {
+        void handleKillSession();
     };
+    process.on('SIGTERM', handleTerminationSignal);
+    process.on('SIGINT', handleTerminationSignal);
 
     // Register abort handler
     session.rpcHandlerManager.registerHandler('abort', handleAbort);
@@ -1218,6 +1226,8 @@ export async function runCodex(opts: {
         }
 
     } finally {
+        process.off('SIGTERM', handleTerminationSignal);
+        process.off('SIGINT', handleTerminationSignal);
         // Clean up resources when main loop exits
         logger.debug('[codex]: Final cleanup start');
         logActiveHandles('cleanup-start');

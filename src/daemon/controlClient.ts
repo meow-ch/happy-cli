@@ -10,6 +10,27 @@ import { projectPath } from '@/projectPath';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { configuration } from '@/configuration';
+import type {
+  DaemonSessionPruneExecutionResult,
+  DaemonSessionPruneRequest,
+} from './sessionPruning';
+import { DEFAULT_DAEMON_PRUNE_TERMINATION_TIMEOUT_MS } from './sessionPruning';
+
+export const DEFAULT_DAEMON_HTTP_TIMEOUT_MS = 10_000;
+export const DAEMON_PRUNE_HTTP_TIMEOUT_MARGIN_MS = 10_000;
+
+export function resolveDaemonHttpTimeout(
+  configuredValue: string | undefined,
+  minimumMs = 0,
+): number {
+  const configured = configuredValue === undefined
+    ? DEFAULT_DAEMON_HTTP_TIMEOUT_MS
+    : Number(configuredValue);
+  const validConfigured = Number.isFinite(configured) && configured > 0
+    ? Math.floor(configured)
+    : DEFAULT_DAEMON_HTTP_TIMEOUT_MS;
+  return Math.max(validConfigured, Math.max(0, Math.floor(minimumMs)));
+}
 
 function readDaemonLockPid(): number | null {
   try {
@@ -23,7 +44,11 @@ function readDaemonLockPid(): number | null {
   }
 }
 
-async function daemonPost(path: string, body?: any): Promise<{ error?: string } | any> {
+async function daemonPost(
+  path: string,
+  body?: any,
+  options: { minimumTimeoutMs?: number } = {},
+): Promise<{ error?: string } | any> {
   const state = await readDaemonState();
   if (!state?.httpPort) {
     const errorMessage = 'No daemon running, no state file found';
@@ -44,7 +69,10 @@ async function daemonPost(path: string, body?: any): Promise<{ error?: string } 
   }
 
   try {
-    const timeout = process.env.HAPPY_DAEMON_HTTP_TIMEOUT ? parseInt(process.env.HAPPY_DAEMON_HTTP_TIMEOUT) : 10_000;
+    const timeout = resolveDaemonHttpTimeout(
+      process.env.HAPPY_DAEMON_HTTP_TIMEOUT,
+      options.minimumTimeoutMs,
+    );
     const response = await fetch(`http://127.0.0.1:${state.httpPort}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -96,6 +124,19 @@ export async function listDaemonSessions(): Promise<any[]> {
 export async function stopDaemonSession(sessionId: string): Promise<boolean> {
   const result = await daemonPost('/stop-session', { sessionId });
   return result.success || false;
+}
+
+export async function pruneDaemonSessions(
+  request: DaemonSessionPruneRequest,
+): Promise<DaemonSessionPruneExecutionResult> {
+  // Never abandon an apply while the server is still within its bounded
+  // graceful-shutdown window; an ambiguous timeout invites duplicate reruns.
+  const result = await daemonPost('/prune-sessions', request, {
+    minimumTimeoutMs: DEFAULT_DAEMON_PRUNE_TERMINATION_TIMEOUT_MS
+      + DAEMON_PRUNE_HTTP_TIMEOUT_MARGIN_MS,
+  });
+  if (result?.error) throw new Error(result.error);
+  return result as DaemonSessionPruneExecutionResult;
 }
 
 export async function spawnDaemonSession(

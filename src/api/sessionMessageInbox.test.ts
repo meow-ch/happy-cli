@@ -85,6 +85,26 @@ describe('SessionMessageInbox', () => {
     expect(inbox.afterSeq).toBe(2);
   });
 
+  it('yields after a bounded page budget and resumes from the durable cursor', async () => {
+    const fetchedAfter: number[] = [];
+    const inbox = new SessionMessageInbox({
+      initialAfterSeq: 0,
+      maxPagesPerReconcile: 2,
+      fetchPage: async (afterSeq) => {
+        fetchedAfter.push(afterSeq);
+        const next = afterSeq + 1;
+        return page([message(next)], next < 3);
+      },
+      deliver: async () => undefined,
+    });
+
+    await expect(inbox.reconcile()).resolves.toEqual({ hasMore: true });
+    expect(inbox.afterSeq).toBe(2);
+    await expect(inbox.reconcile()).resolves.toEqual({ hasMore: false });
+    expect(inbox.afterSeq).toBe(3);
+    expect(fetchedAfter).toEqual([0, 1, 2]);
+  });
+
   it('fails closed on conflicting duplicate sequence identities', async () => {
     const deliver = vi.fn();
     const inbox = new SessionMessageInbox({

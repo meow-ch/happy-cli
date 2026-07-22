@@ -180,4 +180,27 @@ describe('daemon orphaned session outbox replay', () => {
     expect(new SessionMessageOutbox('c-ready', { rootDirectory }).pendingCount).toBe(0);
     expect(new SessionMessageOutbox('d-ready', { rootDirectory }).pendingCount).toBe(0);
   });
+
+  it('caps records per orphan replay pass without discarding durable work', async () => {
+    const outbox = new SessionMessageOutbox('large-orphan', { rootDirectory });
+    outbox.enqueue('encrypted-1', 'local-1');
+    outbox.enqueue('encrypted-2', 'local-2');
+    outbox.enqueue('encrypted-3', 'local-3');
+
+    const first = await replayPendingSessionOutboxes('account-token', {
+      rootDirectory,
+      maxRecordsPerSession: 2,
+    });
+    expect(first).toEqual({ attemptedSessions: 1, drainedSessions: 0, remainingMessages: 1 });
+    expect(socket.emitWithAck).toHaveBeenCalledTimes(2);
+    expect(new SessionMessageOutbox('large-orphan', { rootDirectory }).pendingCount).toBe(1);
+
+    socket.emitWithAck.mockClear();
+    const second = await replayPendingSessionOutboxes('account-token', {
+      rootDirectory,
+      maxRecordsPerSession: 2,
+    });
+    expect(second).toEqual({ attemptedSessions: 1, drainedSessions: 1, remainingMessages: 0 });
+    expect(socket.emitWithAck).toHaveBeenCalledTimes(1);
+  });
 });

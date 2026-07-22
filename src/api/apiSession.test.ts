@@ -83,9 +83,11 @@ describe('ApiSessionClient connection handling', () => {
         messageAckTimeoutMs: 50,
         outboxRetryBaseMs: 60_000,
         outboxRetryMaxMs: 60_000,
+        reconnectRecoveryJitterMs: 0,
         inbox: {
             fetchPage: fetchInboxPage,
             reconcileIntervalMs: 0,
+            periodicJitterMs: 0,
             retryBaseMs: 10,
             retryMaxMs: 10,
             ...inbox,
@@ -150,6 +152,26 @@ describe('ApiSessionClient connection handling', () => {
         socketHandlers.get('connect')?.();
         await vi.waitFor(() => expect(received).toEqual(['after reconnect']));
         expect(client.inboundAfterSeq).toBe(5);
+        await client.close();
+    });
+
+    it('jitters reconnect catch-up instead of synchronizing every session immediately', async () => {
+        const client = new ApiSessionClient('fake-token', mockSession, {
+            ...options(),
+            reconnectRecoveryJitterMs: 100,
+            random: () => 0.5,
+        });
+        mockSocket.connected = true;
+        socketHandlers.get('connect')?.();
+        await vi.waitFor(() => expect(fetchInboxPage).toHaveBeenCalledTimes(1));
+
+        mockSocket.connected = false;
+        socketHandlers.get('disconnect')?.('transport close');
+        mockSocket.connected = true;
+        socketHandlers.get('connect')?.();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(fetchInboxPage).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => expect(fetchInboxPage).toHaveBeenCalledTimes(2), { timeout: 250 });
         await client.close();
     });
 
@@ -457,6 +479,32 @@ describe('ApiSessionClient connection handling', () => {
         await vi.waitFor(() => expect(mockSocket.emitWithAck).toHaveBeenCalledTimes(2));
         deferred.shift()!();
         await vi.waitFor(() => expect(client.pendingOutboxCount).toBe(0));
+        await client.close();
+    });
+
+    it('bounds each live outbox drain pass while retaining the remainder durably', async () => {
+        mockSocket.connected = true;
+        mockSocket.emitWithAck.mockImplementation(async (_event: string, data: any) => ({
+            result: 'success',
+            duplicate: false,
+            message: {
+                id: `server-${data.localId}`,
+                seq: mockSocket.emitWithAck.mock.calls.length,
+                localId: data.localId,
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+            },
+        }));
+        const client = new ApiSessionClient('fake-token', mockSession, {
+            ...options(),
+            outboxDrainBatchSize: 2,
+        });
+        client.sendSessionEvent({ type: 'message', message: 'first' });
+        client.sendSessionEvent({ type: 'message', message: 'second' });
+        client.sendSessionEvent({ type: 'message', message: 'third' });
+
+        await vi.waitFor(() => expect(mockSocket.emitWithAck).toHaveBeenCalledTimes(2));
+        expect(client.pendingOutboxCount).toBe(1);
         await client.close();
     });
 

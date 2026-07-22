@@ -3,6 +3,7 @@ import { MessageQueue2 } from "@/utils/MessageQueue2";
 import { EnhancedMode } from "./loop";
 import { logger } from "@/ui/logger";
 import type { JsRuntime } from "./runClaude";
+import { startSessionHeartbeat } from '@/api/sessionHeartbeat';
 
 export class Session {
     readonly path: string;
@@ -62,10 +63,9 @@ export class Session {
         this.jsRuntime = opts.jsRuntime ?? 'node';
 
         // Start keep alive
-        this.client.keepAlive(this.thinking, this.mode);
-        this.keepAliveInterval = setInterval(() => {
+        this.keepAliveInterval = startSessionHeartbeat(() => {
             this.client.keepAlive(this.thinking, this.mode);
-        }, 2000);
+        });
     }
     
     /**

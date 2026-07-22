@@ -10,6 +10,10 @@ import { logger } from '@/ui/logger';
 import { Metadata } from '@/api/types';
 import { TrackedSession } from './types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
+import type {
+  DaemonSessionPruneExecutionResult,
+  DaemonSessionPruneRequest,
+} from './sessionPruning';
 
 export function startDaemonControlServer({
   getChildren,
@@ -18,6 +22,7 @@ export function startDaemonControlServer({
   requestShutdown,
   onHappySessionWebhook,
   onHappySessionActivity,
+  pruneSessions,
 }: {
   getChildren: () => TrackedSession[] | Promise<TrackedSession[]>;
   stopSession: (sessionId: string) => boolean;
@@ -30,6 +35,7 @@ export function startDaemonControlServer({
     thinking: boolean;
     pendingOutbox: number;
   }) => void;
+  pruneSessions: (request: DaemonSessionPruneRequest) => Promise<DaemonSessionPruneExecutionResult>;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = fastify({
@@ -125,6 +131,31 @@ export function startDaemonControlServer({
       logger.debug(`[CONTROL SERVER] Stop session request: ${sessionId}`);
       const success = stopSession(sessionId);
       return { success };
+    });
+
+    // Auditable and dry-run-by-default cleanup for daemon-owned sessions.
+    typed.post('/prune-sessions', {
+      schema: {
+        body: z.object({
+          apply: z.boolean().optional(),
+          includeLegacy: z.boolean().optional(),
+          legacySafetyAttestation: z.literal('all-active-sessions-protected').optional(),
+          confirmedNoActiveSessions: z.boolean().optional(),
+          protectedSessionIds: z.array(z.string().min(1)).optional(),
+          minAgeMs: z.number().int().nonnegative().optional(),
+          safeReportMaxAgeMs: z.number().int().nonnegative().optional(),
+          batchSize: z.number().int().min(1).max(64).optional(),
+        }),
+        response: { 200: z.any() },
+      },
+    }, async (request) => {
+      logger.debug('[CONTROL SERVER] Session prune request', {
+        apply: request.body.apply === true,
+        includeLegacy: request.body.includeLegacy === true,
+        protectedSessionCount: request.body.protectedSessionIds?.length ?? 0,
+        batchSize: request.body.batchSize,
+      });
+      return pruneSessions(request.body);
     });
 
     // Spawn new session

@@ -29,7 +29,9 @@ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler'
 import { stopCaffeinate } from '@/utils/caffeinate';
 import { connectionState } from '@/utils/serverConnectionErrors';
 import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
+import { onceAsync } from '@/utils/onceAsync';
 import type { ApiSessionClient } from '@/api/apiSession';
+import { startSessionHeartbeat } from '@/api/sessionHeartbeat';
 
 import { createGeminiBackend } from '@/agent/factories/gemini';
 import type { AgentBackend, AgentMessage } from '@/agent';
@@ -290,10 +292,9 @@ export async function runGemini(opts: {
   });
 
   let thinking = false;
-  session.keepAlive(thinking, 'remote');
-  const keepAliveInterval = setInterval(() => {
+  const keepAliveInterval = startSessionHeartbeat(() => {
     session.keepAlive(thinking, 'remote');
-  }, 2000);
+  });
 
   // Track if this is the first message to include system prompt only once
   let isFirstMessage = true;
@@ -370,7 +371,7 @@ export async function runGemini(opts: {
     }
   }
 
-  const handleKillSession = async () => {
+  const handleKillSession = onceAsync(async () => {
     logger.debug('[Gemini] Kill session requested - terminating process');
     await handleAbort();
     logger.debug('[Gemini] Abort completed, proceeding with termination');
@@ -403,7 +404,13 @@ export async function runGemini(opts: {
       logger.debug('[Gemini] Error during session termination:', error);
       process.exit(1);
     }
+  });
+
+  const handleTerminationSignal = () => {
+    void handleKillSession();
   };
+  process.on('SIGTERM', handleTerminationSignal);
+  process.on('SIGINT', handleTerminationSignal);
 
   session.rpcHandlerManager.registerHandler('abort', handleAbort);
   registerKillSessionHandler(session.rpcHandlerManager, handleKillSession);
@@ -1292,6 +1299,8 @@ export async function runGemini(opts: {
     }
 
   } finally {
+    process.off('SIGTERM', handleTerminationSignal);
+    process.off('SIGINT', handleTerminationSignal);
     // Clean up resources
     logger.debug('[gemini]: Final cleanup start');
 
@@ -1331,4 +1340,3 @@ export async function runGemini(opts: {
     logger.debug('[gemini]: Final cleanup completed');
   }
 }
-

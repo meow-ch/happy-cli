@@ -36,6 +36,7 @@ import {
   DaemonSessionStatus,
   pidIsAlive,
   pruneDeadDaemonSessionRecords,
+  readDaemonSessionRegistry,
   removeDaemonSessionRecord,
   updateDaemonSessionActivity,
   upsertDaemonSessionRecord,
@@ -47,6 +48,13 @@ import {
   selectDaemonSessionsForExpiry,
 } from './sessionLifecycle';
 import { buildAgentEnvironment } from './agentEnvironment';
+import { inspectSessionMessageOutboxOnDisk } from '@/api/sessionMessageOutbox';
+import {
+  executeDaemonSessionPrune,
+  type DaemonSessionPruneCandidate,
+  type DaemonSessionPruneExecutionResult,
+  type DaemonSessionPruneRequest,
+} from './sessionPruning';
 
 const SESSION_WEBHOOK_TIMEOUT_MS = 15_000;
 
@@ -955,6 +963,64 @@ export async function startDaemon(): Promise<void> {
       removeDaemonSessionRecord({ pid });
     };
 
+    const buildPruneCandidates = (): DaemonSessionPruneCandidate[] => {
+      const persistedBySessionId = new Map(
+        readDaemonSessionRegistry().map((record) => [record.sessionId, record]),
+      );
+      const candidates: DaemonSessionPruneCandidate[] = [];
+      for (const [pid, session] of pidToTrackedSession.entries()) {
+        if (!session.happySessionId) continue;
+        const persisted = persistedBySessionId.get(session.happySessionId);
+        candidates.push({
+          sessionId: session.happySessionId,
+          pid,
+          startedBy: session.startedBy,
+          startedAt: persisted?.startedAt ?? Date.now(),
+          lastActivityAt: session.lastActivityAt ?? persisted?.lastActivityAt,
+          activityReportedAt: session.activityReportedAt ?? persisted?.activityReportedAt,
+          thinking: session.thinking ?? persisted?.thinking,
+          pendingOutbox: session.pendingOutbox ?? persisted?.pendingOutbox,
+          processAlive: pidIsAlive(pid),
+        });
+      }
+      return candidates;
+    };
+
+    const pruneSessions = async (
+      request: DaemonSessionPruneRequest,
+    ): Promise<DaemonSessionPruneExecutionResult> => {
+      await reconcilePersistedSessions();
+      const result = await executeDaemonSessionPrune(request, {
+        getCandidates: buildPruneCandidates,
+        inspectOutbox: inspectSessionMessageOutboxOnDisk,
+        isProcessAlive: pidIsAlive,
+        signal: (decision) => {
+          const tracked = pidToTrackedSession.get(decision.pid);
+          if (!tracked || tracked.happySessionId !== decision.sessionId) {
+            throw new Error('Session is no longer tracked by this daemon');
+          }
+          try {
+            const accepted = tracked.childProcess
+              ? tracked.childProcess.kill('SIGTERM') || tracked.childProcess.exitCode !== null
+              : (process.kill(decision.pid, 'SIGTERM'), true);
+            if (!accepted) throw new Error('SIGTERM was rejected');
+          } catch (error) {
+            const alreadyExited = typeof error === 'object'
+              && error !== null
+              && 'code' in error
+              && error.code === 'ESRCH';
+            if (!alreadyExited) throw error;
+          }
+        },
+        onTerminated: (decision) => {
+          pidToTrackedSession.delete(decision.pid);
+          removeDaemonSessionRecord({ sessionId: decision.sessionId, pid: decision.pid });
+        },
+      });
+      logger.debugLargeJson('[DAEMON RUN] Session prune audit', result);
+      return result;
+    };
+
     // Start control server
     const { port: controlPort, stop: stopControlServer } = await startDaemonControlServer({
       getChildren: getCurrentChildren,
@@ -963,6 +1029,7 @@ export async function startDaemon(): Promise<void> {
       requestShutdown: () => requestShutdown('happy-cli'),
       onHappySessionWebhook,
       onHappySessionActivity,
+      pruneSessions,
     });
 
     // Write initial daemon state (no lock needed for state file)

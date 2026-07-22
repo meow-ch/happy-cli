@@ -26,6 +26,7 @@ export interface ReplayPendingSessionOutboxesOptions {
   limit?: number;
   connectTimeoutMs?: number;
   ackTimeoutMs?: number;
+  maxRecordsPerSession?: number;
   rootDirectory?: string;
 }
 
@@ -107,7 +108,11 @@ export async function replayPendingSessionOutboxes(
 
     if (connected) {
       try {
+        const maxRecords = Math.max(1, Math.floor(options.maxRecordsPerSession ?? 25));
+        let attemptedRecords = 0;
         for (const record of outbox.pendingRecords()) {
+          if (attemptedRecords >= maxRecords) break;
+          attemptedRecords += 1;
           const rawAnswer = await socket
             .timeout(options.ackTimeoutMs ?? 15_000)
             .emitWithAck('message', {
@@ -135,7 +140,11 @@ export async function replayPendingSessionOutboxes(
         }
 
         let sessionEnd = outbox.pendingSessionEnd();
-        while (outbox.pendingRecords().length === 0 && !outbox.hasBarrier && sessionEnd) {
+        while (outbox.pendingRecords().length === 0
+          && !outbox.hasBarrier
+          && sessionEnd
+          && attemptedRecords < maxRecords) {
+          attemptedRecords += 1;
           const rawAnswer = await socket
             .timeout(options.ackTimeoutMs ?? 15_000)
             .emitWithAck('session-end', {

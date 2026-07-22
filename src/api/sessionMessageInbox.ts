@@ -5,6 +5,12 @@ export interface SessionMessageInboxOptions {
   fetchPage: (afterSeq: number) => Promise<SessionMessageReplayPage>;
   deliver: (message: SessionMessage) => void | Promise<void>;
   maxRememberedIds?: number;
+  /** Bounds catch-up work before yielding to the caller's jittered scheduler. */
+  maxPagesPerReconcile?: number;
+}
+
+export interface SessionMessageInboxReconcileResult {
+  hasMore: boolean;
 }
 
 /**
@@ -16,9 +22,10 @@ export class SessionMessageInbox {
   private readonly fetchPage: SessionMessageInboxOptions['fetchPage'];
   private readonly deliver: SessionMessageInboxOptions['deliver'];
   private readonly maxRememberedIds: number;
+  private readonly maxPagesPerReconcile: number;
   private readonly rememberedIds = new Map<string, number>();
   private requested = false;
-  private worker: Promise<void> | null = null;
+  private worker: Promise<SessionMessageInboxReconcileResult> | null = null;
 
   constructor(options: SessionMessageInboxOptions) {
     if (!Number.isInteger(options.initialAfterSeq) || options.initialAfterSeq < 0) {
@@ -28,6 +35,7 @@ export class SessionMessageInbox {
     this.fetchPage = options.fetchPage;
     this.deliver = options.deliver;
     this.maxRememberedIds = Math.max(1, options.maxRememberedIds ?? 2_048);
+    this.maxPagesPerReconcile = Math.max(1, Math.floor(options.maxPagesPerReconcile ?? 4));
   }
 
   get afterSeq(): number {
@@ -35,18 +43,21 @@ export class SessionMessageInbox {
   }
 
   /** Coalesces concurrent wake-ups into one strictly serialized reconciliation. */
-  reconcile(): Promise<void> {
+  reconcile(): Promise<SessionMessageInboxReconcileResult> {
     this.requested = true;
     if (!this.worker) this.worker = this.runWorker();
     return this.worker;
   }
 
-  private async runWorker(): Promise<void> {
+  private async runWorker(): Promise<SessionMessageInboxReconcileResult> {
+    let remainingPages = this.maxPagesPerReconcile;
     try {
-      while (this.requested) {
+      while (this.requested && remainingPages > 0) {
         this.requested = false;
         try {
-          await this.reconcilePages();
+          const result = await this.reconcilePages(remainingPages);
+          remainingPages -= result.pagesFetched;
+          if (result.hasMore) this.requested = true;
         } catch (error) {
           // A failed delivery or fetch must remain requested so the next retry
           // begins at the last message which was safely handed off.
@@ -54,6 +65,7 @@ export class SessionMessageInbox {
           throw error;
         }
       }
+      return { hasMore: this.requested };
     } finally {
       // This runs before the worker promise settles, so a later wake-up cannot
       // observe a settled-but-still-registered worker and get lost.
@@ -61,11 +73,13 @@ export class SessionMessageInbox {
     }
   }
 
-  private async reconcilePages(): Promise<void> {
+  private async reconcilePages(maxPages: number): Promise<{ hasMore: boolean; pagesFetched: number }> {
     let hasMore = false;
+    let pagesFetched = 0;
     do {
       const pageStart = this.cursor;
       const page = await this.fetchPage(pageStart);
+      pagesFetched += 1;
       const messages = this.validatePage(page, pageStart);
 
       for (const message of messages) {
@@ -85,7 +99,8 @@ export class SessionMessageInbox {
       if (hasMore && this.cursor === pageStart) {
         throw new Error('Session message replay page made no cursor progress');
       }
-    } while (hasMore);
+    } while (hasMore && pagesFetched < maxPages);
+    return { hasMore, pagesFetched };
   }
 
   private validatePage(page: SessionMessageReplayPage, pageStart: number): SessionMessage[] {

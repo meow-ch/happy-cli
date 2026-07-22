@@ -23,12 +23,13 @@ import { install } from './daemon/install'
 import { uninstall } from './daemon/uninstall'
 import { ApiClient } from './api/api'
 import { runDoctorCommand } from './ui/doctor'
-import { listDaemonSessions, stopDaemonSession } from './daemon/controlClient'
+import { listDaemonSessions, pruneDaemonSessions, stopDaemonSession } from './daemon/controlClient'
 import { handleAuthCommand } from './commands/auth'
 import { handleConnectCommand } from './commands/connect'
 import { spawnHappyCLI } from './utils/spawnHappyCLI'
 import { claudeCliPath } from './claude/claudeLocal'
 import { execFileSync } from 'node:child_process'
+import { parseDaemonPruneArguments } from './daemon/pruneCommand'
 
 
 (async () => {
@@ -391,6 +392,18 @@ import { execFileSync } from 'node:child_process'
       }
       return
 
+    } else if (daemonSubcommand === 'prune-sessions') {
+      try {
+        const request = parseDaemonPruneArguments(args.slice(2));
+        const result = await pruneDaemonSessions(request);
+        console.log(JSON.stringify(result, null, 2));
+        if (result.terminationFailureCount > 0) process.exitCode = 1;
+      } catch (error) {
+        console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error');
+        process.exitCode = 1;
+      }
+      return
+
     } else if (daemonSubcommand === 'start') {
       // Spawn detached daemon process
       const child = spawnHappyCLI(['daemon', 'start-sync'], {
@@ -460,6 +473,7 @@ ${chalk.bold('Usage:')}
   ${cli} daemon stop               Stop the daemon (sessions stay alive)
   ${cli} daemon status             Show daemon status
   ${cli} daemon list               List active sessions
+  ${cli} daemon prune-sessions     Audit/prune old daemon sessions (dry-run by default)
 
   If you want to kill all ${cli} related processes run
   ${chalk.cyan(`${cli} doctor clean`)}

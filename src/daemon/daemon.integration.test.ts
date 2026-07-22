@@ -112,6 +112,10 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
   });
 
   it('should track session-started webhook from terminal session', async () => {
+    const trackedProcess = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore',
+    });
+    if (!trackedProcess.pid) throw new Error('Failed to spawn tracked integration-test process');
     // Simulate a terminal-started session reporting to daemon
     const mockMetadata: Metadata = {
       path: '/test/path',
@@ -120,21 +124,26 @@ describe.skipIf(!await isServerHealthy())('Daemon Integration Tests', { timeout:
       happyHomeDir: '/test/happy-home',
       happyLibDir: '/test/happy-lib',
       happyToolsDir: '/test/happy-tools',
-      hostPid: 99999,
+      hostPid: trackedProcess.pid,
       startedBy: 'terminal',
       machineId: 'test-machine-123'
     };
 
-    await notifyDaemonSessionStarted('test-session-123', mockMetadata);
+    try {
+      await notifyDaemonSessionStarted('test-session-123', mockMetadata);
 
-    // Verify session is tracked
-    const sessions = await listDaemonSessions();
-    expect(sessions).toHaveLength(1);
-    
-    const tracked = sessions[0];
-    expect(tracked.startedBy).toBe('boujot directly - likely by user from terminal');
-    expect(tracked.happySessionId).toBe('test-session-123');
-    expect(tracked.pid).toBe(99999);
+      // Verify session is tracked
+      const sessions = await listDaemonSessions();
+      expect(sessions).toHaveLength(1);
+
+      const tracked = sessions[0];
+      expect(tracked.startedBy).toBe('boujot directly - likely by user from terminal');
+      expect(tracked.happySessionId).toBe('test-session-123');
+      expect(tracked.pid).toBe(trackedProcess.pid);
+    } finally {
+      await stopDaemonSession('test-session-123');
+      if (trackedProcess.exitCode === null) trackedProcess.kill('SIGTERM');
+    }
   });
 
   it('should spawn & stop a session via HTTP (not testing RPC route, but similar enough)', async () => {

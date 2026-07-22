@@ -11,6 +11,7 @@ import { codexModelList, type CodexModelInfo } from '@/codex/codexModelList';
 import { claudeModelList, type ClaudeModelInfo } from '@/claude/claudeModelList';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { RpcHandlerManager } from '../../api/rpc/RpcHandlerManager';
+import type { AgentPlaneSessionEncryptionAttestation } from '../../api/types';
 import { validatePath } from './pathSecurity';
 
 const execAsync = promisify(exec);
@@ -194,7 +195,12 @@ export interface SpawnSessionOptions {
 export type EnvironmentVariablesMode = 'replace' | 'overlay';
 
 export type SpawnSessionResult =
-    | { type: 'success'; sessionId: string; terminalProtocol?: 1 }
+    | {
+        type: 'success';
+        sessionId: string;
+        terminalProtocol?: 1;
+        sessionEncryption?: AgentPlaneSessionEncryptionAttestation;
+    }
     | { type: 'requestToApproveDirectoryCreation'; directory: string }
     | { type: 'error'; errorMessage: string };
 

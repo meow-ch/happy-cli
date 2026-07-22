@@ -6,7 +6,15 @@
 import { io, Socket } from 'socket.io-client';
 import { logger } from '@/ui/logger';
 import { configuration } from '@/configuration';
-import { MachineMetadata, DaemonState, Machine, Update, UpdateMachineBody } from './types';
+import {
+    agentPlaneSessionEncryptionAttestation,
+    type AgentPlaneSessionEncryptionAttestation,
+    type MachineMetadata,
+    type DaemonState,
+    type Machine,
+    type Update,
+    type UpdateMachineBody,
+} from './types';
 import { registerCommonHandlers, SpawnSessionOptions, SpawnSessionResult } from '../modules/common/registerCommonHandlers';
 import { encodeBase64, decodeBase64, encrypt, decrypt } from './encryption';
 import { backoff } from '@/utils/time';
@@ -93,6 +101,7 @@ type MachineRpcHandlers = {
         startedBy?: string;
         trackingSource?: 'memory' | 'registry';
         terminalProtocol?: 1;
+        sessionEncryption?: AgentPlaneSessionEncryptionAttestation;
     }> | Promise<Array<{
         sessionId: string;
         status: DaemonSessionStatus;
@@ -100,6 +109,7 @@ type MachineRpcHandlers = {
         startedBy?: string;
         trackingSource?: 'memory' | 'registry';
         terminalProtocol?: 1;
+        sessionEncryption?: AgentPlaneSessionEncryptionAttestation;
     }>>;
     providerReadiness: (request: ProviderReadinessRequest) => Promise<ProviderReadinessResponse>;
     requestShutdown: () => void;
@@ -128,7 +138,7 @@ function boundedAgentPlaneRpcError(error: unknown): string {
 
 type DaemonManagedMachineMetadataKey = typeof DAEMON_MANAGED_MACHINE_METADATA_KEYS[number];
 
-export function buildDaemonCapabilities() {
+export function buildDaemonCapabilities(encryptionVariant: Machine['encryptionVariant']) {
     return {
         type: 'daemon-capabilities',
         happyCliVersion: packageJson.version,
@@ -161,6 +171,7 @@ export function buildDaemonCapabilities() {
                 requestShape: 'spawn-happy-session-v1',
                 responseShape: 'spawn-happy-session-v1',
                 resultRetention: 'caller_acknowledged',
+                sessionEncryption: agentPlaneSessionEncryptionAttestation(encryptionVariant),
             },
             agentPlaneSessionStop: {
                 supported: true,
@@ -287,7 +298,7 @@ export class ApiMachineClient {
         );
         this.rpcHandlerManager.registerHandler(
             'daemon-capabilities',
-            async () => buildDaemonCapabilities(),
+            async () => buildDaemonCapabilities(this.machine.encryptionVariant),
             { execution: 'read-only' },
         );
         this.rpcHandlerManager.registerHandler(
@@ -415,6 +426,9 @@ export class ApiMachineClient {
                         sessionId: result.sessionId,
                         ...(result.terminalProtocol !== undefined
                             ? { terminalProtocol: result.terminalProtocol }
+                            : {}),
+                        ...(result.sessionEncryption !== undefined
+                            ? { sessionEncryption: result.sessionEncryption }
                             : {}),
                     };
 

@@ -494,6 +494,10 @@ describe('machine session status RPC', () => {
                     requestShape: 'spawn-happy-session-v1',
                     responseShape: 'spawn-happy-session-v1',
                     resultRetention: 'caller_acknowledged',
+                    sessionEncryption: {
+                        credentialMode: 'legacy',
+                        sessionMode: 'legacy',
+                    },
                 },
                 agentPlaneSessionStop: {
                     supported: true,
@@ -526,6 +530,28 @@ describe('machine session status RPC', () => {
                     },
                 },
             },
+        });
+    });
+
+    it('derives data-key session encryption capability from the live machine credential', async () => {
+        const client = new ApiMachineClient('token', {
+            id: 'machine_data_key',
+            name: 'machine_data_key',
+            encryptionKey: new Uint8Array(32),
+            encryptionVariant: 'dataKey',
+            metadata: null,
+            metadataVersion: 0,
+            daemonState: null,
+            daemonStateVersion: 0,
+        } as any);
+
+        const manager = (client as any).rpcHandlerManager;
+        const handler = manager.handlers.get('machine_data_key:daemon-capabilities');
+        const response = await handler({});
+
+        expect(response.capabilities.agentPlaneSessionSpawn.sessionEncryption).toEqual({
+            credentialMode: 'data_key',
+            sessionMode: 'data_key',
         });
     });
 
@@ -695,7 +721,7 @@ describe('machine session status RPC', () => {
         expect(calls).toHaveLength(1);
     });
 
-    it('forwards and returns the exact child terminal-protocol attestation', async () => {
+    it('forwards and returns exact child terminal and encryption attestations', async () => {
         const client = new ApiMachineClient('token', {
             id: 'machine_test',
             name: 'machine_test',
@@ -711,7 +737,15 @@ describe('machine session status RPC', () => {
         client.setRPCHandlers({
             spawnSession: async (options) => {
                 calls.push(options);
-                return { type: 'success', sessionId: 'sid_claude_v1', terminalProtocol: 1 };
+                return {
+                    type: 'success',
+                    sessionId: 'sid_claude_v1',
+                    terminalProtocol: 1,
+                    sessionEncryption: {
+                        credentialMode: 'data_key',
+                        sessionMode: 'data_key',
+                    },
+                };
             },
             stopSession: () => false,
             sessionStatusList: () => [],
@@ -740,6 +774,10 @@ describe('machine session status RPC', () => {
             type: 'success',
             sessionId: 'sid_claude_v1',
             terminalProtocol: 1,
+            sessionEncryption: {
+                credentialMode: 'data_key',
+                sessionMode: 'data_key',
+            },
         });
         expect(calls).toEqual([expect.objectContaining({
             directory: '/tmp/conversations/conv_v1',
@@ -768,6 +806,10 @@ describe('machine session status RPC', () => {
                 status: sessionId === 'sid_live' ? 'tracked_alive' : 'unknown',
                 pid: sessionId === 'sid_live' ? 123 : undefined,
                 terminalProtocol: sessionId === 'sid_live' ? 1 : undefined,
+                sessionEncryption: sessionId === 'sid_live' ? {
+                    credentialMode: 'data_key' as const,
+                    sessionMode: 'data_key' as const,
+                } : undefined,
             })),
             providerReadiness: async () => ({
                 type: 'provider-readiness',
@@ -791,8 +833,23 @@ describe('machine session status RPC', () => {
         await expect(handler({ sessionIds: ['sid_live', '', 42, 'sid_missing'] })).resolves.toEqual({
             success: true,
             sessions: [
-                { sessionId: 'sid_live', status: 'tracked_alive', pid: 123, terminalProtocol: 1 },
-                { sessionId: 'sid_missing', status: 'unknown', pid: undefined, terminalProtocol: undefined },
+                {
+                    sessionId: 'sid_live',
+                    status: 'tracked_alive',
+                    pid: 123,
+                    terminalProtocol: 1,
+                    sessionEncryption: {
+                        credentialMode: 'data_key',
+                        sessionMode: 'data_key',
+                    },
+                },
+                {
+                    sessionId: 'sid_missing',
+                    status: 'unknown',
+                    pid: undefined,
+                    terminalProtocol: undefined,
+                    sessionEncryption: undefined,
+                },
             ],
         });
     });

@@ -23,6 +23,37 @@ export type CodexPermissionProfile = ':read-only' | ':workspace' | ':danger-full
 export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never'
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
+/** Stable wire names used when attesting session encryption to Agent Plane. */
+export type AgentPlaneSessionEncryptionMode = 'data_key' | 'legacy'
+
+/**
+ * Encryption proof for a session created by the currently loaded credential.
+ * The two fields are intentionally distinct so a future credential format can
+ * change its session-encryption policy without silently weakening the contract.
+ */
+export type AgentPlaneSessionEncryptionAttestation = {
+  credentialMode: AgentPlaneSessionEncryptionMode
+  sessionMode: AgentPlaneSessionEncryptionMode
+}
+
+export function agentPlaneSessionEncryptionAttestation(
+  encryptionVariant: 'dataKey' | 'legacy',
+): AgentPlaneSessionEncryptionAttestation {
+  const mode = encryptionVariant === 'dataKey' ? 'data_key' : 'legacy'
+  return { credentialMode: mode, sessionMode: mode }
+}
+
+export function isAgentPlaneSessionEncryptionAttestation(
+  value: unknown,
+): value is AgentPlaneSessionEncryptionAttestation {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const candidate = value as Record<string, unknown>
+  const isMode = (mode: unknown): mode is AgentPlaneSessionEncryptionMode => (
+    mode === 'data_key' || mode === 'legacy'
+  )
+  return isMode(candidate.credentialMode) && isMode(candidate.sessionMode)
+}
+
 /**
  * Usage data type from Claude
  */
@@ -462,6 +493,8 @@ export type Metadata = {
   flavor?: string
   /** Session-process attestation for authoritative Agent Plane terminals. */
   terminalProtocol?: 1
+  /** Exact session-process encryption attestation reported to its daemon. */
+  sessionEncryption?: AgentPlaneSessionEncryptionAttestation
 };
 
 export type AgentRequestKind = 'permission' | 'questionnaire' | 'plan_decision'

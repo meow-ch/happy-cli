@@ -4,7 +4,13 @@ import * as tmp from 'tmp';
 
 import { ApiClient } from '@/api/api';
 import { TrackedSession } from './types';
-import { MachineMetadata, DaemonState, Metadata } from '@/api/types';
+import {
+  isAgentPlaneSessionEncryptionAttestation,
+  type AgentPlaneSessionEncryptionAttestation,
+  type MachineMetadata,
+  type DaemonState,
+  type Metadata,
+} from '@/api/types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
 import { logger } from '@/ui/logger';
 import { authAndSetupMachineIfNeeded } from '@/ui/auth';
@@ -50,6 +56,10 @@ import {
 import { buildAgentEnvironment } from './agentEnvironment';
 import { inspectSessionMessageOutboxOnDisk } from '@/api/sessionMessageOutbox';
 import {
+  processBirthFingerprintMatches,
+  readProcessBirthFingerprint,
+} from './processBirthFingerprint';
+import {
   executeDaemonSessionPrune,
   type DaemonSessionPruneCandidate,
   type DaemonSessionPruneExecutionResult,
@@ -83,11 +93,17 @@ function attestedSpawnResult(
       errorMessage: `Spawned child did not attest required terminal protocol ${requiredTerminalProtocol}.`,
     };
   }
+  if (!session.processBirthFingerprint) {
+    return { type: 'error', errorMessage: 'Spawned child process identity could not be verified.' };
+  }
   return {
     type: 'success',
     sessionId: session.happySessionId,
     ...(session.terminalProtocol !== undefined
       ? { terminalProtocol: session.terminalProtocol }
+      : {}),
+    ...(session.sessionEncryption !== undefined
+      ? { sessionEncryption: session.sessionEncryption }
       : {}),
   };
 }
@@ -305,6 +321,23 @@ export async function startDaemon(): Promise<void> {
     const pidToAwaiter = new Map<number, (session: TrackedSession) => void>();
     let spawnInFlight = 0;
 
+    const trackedProcessIdentityMatches = (pid: number, session: TrackedSession): boolean => (
+      processBirthFingerprintMatches(
+        session.processBirthFingerprint,
+        readProcessBirthFingerprint(pid),
+      )
+    );
+
+    const discardTrackedSessionsWithInvalidProcessIdentity = () => {
+      for (const [pid, session] of pidToTrackedSession.entries()) {
+        if (!trackedProcessIdentityMatches(pid, session)) {
+          logger.debug(`[DAEMON RUN] Removing stale session with PID ${pid} (process-birth identity missing or changed)`);
+          pidToTrackedSession.delete(pid);
+          removeDaemonSessionRecord({ pid });
+        }
+      }
+    };
+
     // Helper functions
     const isSessionProcessType = (type: string) => (
       type === 'daemon-spawned-session'
@@ -342,6 +375,16 @@ export async function startDaemon(): Promise<void> {
           continue;
         }
 
+        const observedProcessBirthFingerprint = readProcessBirthFingerprint(record.pid);
+        if (!processBirthFingerprintMatches(
+          record.processBirthFingerprint,
+          observedProcessBirthFingerprint,
+        )) {
+          removeDaemonSessionRecord({ sessionId: record.sessionId, pid: record.pid });
+          logger.debug(`[DAEMON RUN] Refused session re-adoption without matching process-birth identity for ${record.sessionId} PID ${record.pid}`);
+          continue;
+        }
+
         pidToTrackedSession.set(record.pid, {
           startedBy: record.startedBy,
           happySessionId: record.sessionId,
@@ -352,6 +395,8 @@ export async function startDaemon(): Promise<void> {
           pendingOutbox: record.pendingOutbox,
           activityReportedAt: record.activityReportedAt,
           terminalProtocol: record.terminalProtocol,
+          sessionEncryption: record.sessionEncryption,
+          processBirthFingerprint: record.processBirthFingerprint,
         });
         logger.debug(`[DAEMON RUN] Re-adopted session ${record.sessionId} from registry PID ${record.pid}`);
       }
@@ -359,6 +404,7 @@ export async function startDaemon(): Promise<void> {
 
     const getCurrentChildren = async () => {
       await reconcilePersistedSessions();
+      discardTrackedSessionsWithInvalidProcessIdentity();
       return Array.from(pidToTrackedSession.values());
     };
 
@@ -408,18 +454,30 @@ export async function startDaemon(): Promise<void> {
 
       // Check if we already have this PID (daemon-spawned)
       const existingSession = pidToTrackedSession.get(pid);
+      const observedProcessBirthFingerprint = readProcessBirthFingerprint(pid);
 
       if (existingSession && existingSession.startedBy === 'daemon') {
+        if (!processBirthFingerprintMatches(
+          existingSession.processBirthFingerprint,
+          observedProcessBirthFingerprint,
+        )) {
+          logger.debug(`[DAEMON RUN] Ignored session webhook with mismatched process-birth identity for PID ${pid}`);
+          return;
+        }
         // Update daemon-spawned session with reported data
         existingSession.happySessionId = sessionId;
         existingSession.happySessionMetadataFromLocalWebhook = sessionMetadata;
         existingSession.terminalProtocol = sessionMetadata.terminalProtocol === 1 ? 1 : undefined;
+        existingSession.sessionEncryption = isAgentPlaneSessionEncryptionAttestation(
+          sessionMetadata.sessionEncryption,
+        ) ? sessionMetadata.sessionEncryption : undefined;
         existingSession.trackingSource = existingSession.trackingSource ?? 'memory';
         const persisted = upsertDaemonSessionRecord({
           sessionId,
           pid,
           startedBy: existingSession.startedBy,
           metadata: sessionMetadata,
+          processBirthFingerprint: existingSession.processBirthFingerprint,
         });
         existingSession.lastActivityAt = persisted.lastActivityAt;
         existingSession.thinking = persisted.thinking;
@@ -435,6 +493,10 @@ export async function startDaemon(): Promise<void> {
           logger.debug(`[DAEMON RUN] Resolved session awaiter for PID ${pid}`);
         }
       } else if (!existingSession) {
+        if (!observedProcessBirthFingerprint) {
+          logger.debug(`[DAEMON RUN] Ignored external session webhook without verifiable process-birth identity for PID ${pid}`);
+          return;
+        }
         // New session started externally
         const trackedSession: TrackedSession = {
           startedBy: `${configuration.cliName} directly - likely by user from terminal`,
@@ -446,6 +508,10 @@ export async function startDaemon(): Promise<void> {
           thinking: false,
           pendingOutbox: 0,
           terminalProtocol: sessionMetadata.terminalProtocol === 1 ? 1 : undefined,
+          sessionEncryption: isAgentPlaneSessionEncryptionAttestation(
+            sessionMetadata.sessionEncryption,
+          ) ? sessionMetadata.sessionEncryption : undefined,
+          processBirthFingerprint: observedProcessBirthFingerprint,
         };
         pidToTrackedSession.set(pid, trackedSession);
         upsertDaemonSessionRecord({
@@ -453,6 +519,7 @@ export async function startDaemon(): Promise<void> {
           pid,
           startedBy: trackedSession.startedBy,
           metadata: sessionMetadata,
+          processBirthFingerprint: observedProcessBirthFingerprint,
         });
         logger.debug(`[DAEMON RUN] Registered externally-started session ${sessionId}`);
       }
@@ -688,11 +755,23 @@ export async function startDaemon(): Promise<void> {
               throw new Error('Tmux window created but no PID returned');
             }
 
+            const processBirthFingerprint = readProcessBirthFingerprint(tmuxResult.pid);
+            if (!processBirthFingerprint) {
+              try {
+                process.kill(tmuxResult.pid, 'SIGTERM');
+              } catch {}
+              return {
+                type: 'error',
+                errorMessage: `Could not verify spawned process identity for PID ${tmuxResult.pid} (tmux)`,
+              };
+            }
+
             // Create a tracked session for tmux windows - now we have the real PID!
             const trackedSession: TrackedSession = {
               startedBy: 'daemon',
               pid: tmuxResult.pid, // Real PID from tmux -P flag
               trackingSource: 'memory',
+              processBirthFingerprint,
               tmuxSessionId: tmuxResult.sessionId,
               directoryCreated,
               message: directoryCreated
@@ -793,12 +872,24 @@ export async function startDaemon(): Promise<void> {
             };
           }
 
+          const processBirthFingerprint = readProcessBirthFingerprint(happyProcess.pid);
+          if (!processBirthFingerprint) {
+            try {
+              happyProcess.kill('SIGTERM');
+            } catch {}
+            return {
+              type: 'error',
+              errorMessage: `Could not verify spawned process identity for PID ${happyProcess.pid}`,
+            };
+          }
+
           logger.debug(`[DAEMON RUN] Spawned process with PID ${happyProcess.pid}`);
 
           const trackedSession: TrackedSession = {
             startedBy: 'daemon',
             pid: happyProcess.pid,
             trackingSource: 'memory',
+            processBirthFingerprint,
             childProcess: happyProcess,
             directoryCreated,
             message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
@@ -873,6 +964,13 @@ export async function startDaemon(): Promise<void> {
         if (session.happySessionId === sessionId ||
           (sessionId.startsWith('PID-') && pid === parseInt(sessionId.replace('PID-', '')))) {
 
+          if (!trackedProcessIdentityMatches(pid, session)) {
+            pidToTrackedSession.delete(pid);
+            removeDaemonSessionRecord({ sessionId: session.happySessionId, pid });
+            logger.debug(`[DAEMON RUN] Refused to stop PID ${pid} because its process-birth identity no longer matches`);
+            return false;
+          }
+
           let stopRequestAccepted = false;
           if (session.startedBy === 'daemon' && session.childProcess) {
             try {
@@ -924,22 +1022,27 @@ export async function startDaemon(): Promise<void> {
     ): {
       sessionId: string;
       status: DaemonSessionStatus;
-      pid: number;
-      startedBy: string;
-      trackingSource: 'memory' | 'registry';
+      pid?: number;
+      startedBy?: string;
+      trackingSource?: 'memory' | 'registry';
       terminalProtocol?: 1;
+      sessionEncryption?: AgentPlaneSessionEncryptionAttestation;
     } => {
+      if (!trackedProcessIdentityMatches(pid, session)) {
+        pidToTrackedSession.delete(pid);
+        removeDaemonSessionRecord({ sessionId: session.happySessionId, pid });
+        logger.debug(`[DAEMON RUN] Withheld session status because process-birth identity no longer matches for PID ${pid}`);
+        return { sessionId, status: 'unknown' };
+      }
       const trackingSource = session.trackingSource ?? 'memory';
-      const alive = pidIsAlive(pid);
       return {
         sessionId,
-        status: alive
-          ? (trackingSource === 'registry' ? 'recovered_alive' : 'tracked_alive')
-          : (trackingSource === 'registry' ? 'recovered_dead' : 'tracked_dead'),
+        status: trackingSource === 'registry' ? 'recovered_alive' : 'tracked_alive',
         pid,
         startedBy: session.startedBy,
         trackingSource,
         terminalProtocol: session.terminalProtocol,
+        sessionEncryption: session.sessionEncryption,
       };
     };
 
@@ -980,7 +1083,7 @@ export async function startDaemon(): Promise<void> {
           activityReportedAt: session.activityReportedAt ?? persisted?.activityReportedAt,
           thinking: session.thinking ?? persisted?.thinking,
           pendingOutbox: session.pendingOutbox ?? persisted?.pendingOutbox,
-          processAlive: pidIsAlive(pid),
+          processAlive: trackedProcessIdentityMatches(pid, session),
         });
       }
       return candidates;
@@ -998,6 +1101,11 @@ export async function startDaemon(): Promise<void> {
           const tracked = pidToTrackedSession.get(decision.pid);
           if (!tracked || tracked.happySessionId !== decision.sessionId) {
             throw new Error('Session is no longer tracked by this daemon');
+          }
+          if (!trackedProcessIdentityMatches(decision.pid, tracked)) {
+            pidToTrackedSession.delete(decision.pid);
+            removeDaemonSessionRecord({ sessionId: decision.sessionId, pid: decision.pid });
+            throw new Error('Session process identity changed before termination');
           }
           try {
             const accepted = tracked.childProcess
@@ -1082,6 +1190,7 @@ export async function startDaemon(): Promise<void> {
       if (outboxReplayRunning) return;
       outboxReplayRunning = true;
       try {
+        discardTrackedSessionsWithInvalidProcessIdentity();
         const activeSessionIds = new Set(
           Array.from(pidToTrackedSession.values())
             .map((session) => session.happySessionId)
@@ -1126,17 +1235,7 @@ export async function startDaemon(): Promise<void> {
       }
 
       // Prune stale sessions
-      for (const [pid, _] of pidToTrackedSession.entries()) {
-        try {
-          // Check if process is still alive (signal 0 doesn't kill, just checks)
-          process.kill(pid, 0);
-        } catch (error) {
-          // Process is dead, remove from tracking
-          logger.debug(`[DAEMON RUN] Removing stale session with PID ${pid} (process no longer exists)`);
-          pidToTrackedSession.delete(pid);
-          removeDaemonSessionRecord({ pid });
-        }
-      }
+      discardTrackedSessionsWithInvalidProcessIdentity();
 
       const expiryDecisions = selectDaemonSessionsForExpiry(
         Array.from(pidToTrackedSession.values()),

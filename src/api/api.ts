@@ -1,6 +1,15 @@
 import axios from 'axios'
 import { logger } from '@/ui/logger'
-import type { AgentState, CreateSessionResponse, Metadata, Session, Machine, MachineMetadata, DaemonState } from '@/api/types'
+import {
+  agentPlaneSessionEncryptionAttestation,
+  type AgentState,
+  type CreateSessionResponse,
+  type Metadata,
+  type Session,
+  type Machine,
+  type MachineMetadata,
+  type DaemonState,
+} from '@/api/types'
 import { ApiSessionClient } from './apiSession';
 import { ApiMachineClient } from './apiMachine';
 import { decodeBase64, encodeBase64, getRandomBytes, encrypt, decrypt, libsodiumEncryptForPublicKey } from './encryption';
@@ -54,6 +63,12 @@ export class ApiClient {
       encryptionKey = this.credential.encryption.secret;
       encryptionVariant = 'legacy';
     }
+
+    // Mutate the shared metadata object before it is encrypted and before the
+    // provider reports it to the local daemon. This is derived from the exact
+    // branch which selects the session encryption key, so Claude, Codex and
+    // Gemini all attest the same real behavior rather than a provider default.
+    opts.metadata.sessionEncryption = agentPlaneSessionEncryptionAttestation(encryptionVariant);
 
     // Create session
     try {

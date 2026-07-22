@@ -37,6 +37,11 @@ describe('daemon session registry', () => {
         path: '/tmp/work',
         flavor: 'codex',
         terminalProtocol: 1,
+        processBirthFingerprint: 'v1:birth-123',
+        sessionEncryption: {
+          credentialMode: 'data_key',
+          sessionMode: 'data_key',
+        },
         startedAt: 100,
         updatedAt: 100,
       },
@@ -50,13 +55,18 @@ describe('daemon session registry', () => {
         path: '/tmp/work',
         flavor: 'codex',
         terminalProtocol: 1,
+        processBirthFingerprint: 'v1:birth-123',
+        sessionEncryption: {
+          credentialMode: 'data_key',
+          sessionMode: 'data_key',
+        },
         startedAt: 100,
         updatedAt: 100,
       },
     ]);
   });
 
-  it('persists protocol proof only when reported by the exact session process', () => {
+  it('persists terminal and encryption proof only when reported by the exact session process', () => {
     const path = registryPath();
     const attested = upsertDaemonSessionRecord({
       sessionId: 'sid_v1',
@@ -67,10 +77,24 @@ describe('daemon session registry', () => {
         path: '/tmp/v1',
         flavor: 'claude',
         terminalProtocol: 1,
+        sessionEncryption: {
+          credentialMode: 'data_key',
+          sessionMode: 'data_key',
+        },
       } as any,
+      processBirthFingerprint: 'v1:birth-333',
     }, path);
     expect(attested.terminalProtocol).toBe(1);
+    expect(attested.sessionEncryption).toEqual({
+      credentialMode: 'data_key',
+      sessionMode: 'data_key',
+    });
     expect(readDaemonSessionRegistry(path)[0]?.terminalProtocol).toBe(1);
+    expect(readDaemonSessionRegistry(path)[0]?.sessionEncryption).toEqual({
+      credentialMode: 'data_key',
+      sessionMode: 'data_key',
+    });
+    expect(readDaemonSessionRegistry(path)[0]?.processBirthFingerprint).toBe('v1:birth-333');
 
     const legacyReplacement = upsertDaemonSessionRecord({
       sessionId: 'sid_v1',
@@ -81,8 +105,29 @@ describe('daemon session registry', () => {
         path: '/tmp/legacy',
         flavor: 'claude',
       } as any,
+      processBirthFingerprint: 'v1:birth-444',
     }, path);
     expect(legacyReplacement).not.toHaveProperty('terminalProtocol');
+    expect(legacyReplacement).not.toHaveProperty('sessionEncryption');
+  });
+
+  it('continues to decode retained legacy records without an encryption attestation', () => {
+    const path = registryPath();
+    writeDaemonSessionRegistry([{
+      sessionId: 'sid_retained_legacy',
+      pid: 777,
+      startedBy: 'daemon',
+      startedAt: 100,
+      updatedAt: 100,
+    }], path);
+
+    expect(readDaemonSessionRegistry(path)).toEqual([{
+      sessionId: 'sid_retained_legacy',
+      pid: 777,
+      startedBy: 'daemon',
+      startedAt: 100,
+      updatedAt: 100,
+    }]);
   });
 
   it('upserts by session id and pid', () => {

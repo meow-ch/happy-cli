@@ -2,7 +2,7 @@
  * Daemon-specific types (not related to API/server communication)
  */
 
-import { Metadata } from '@/api/types';
+import type { AgentPlaneSessionEncryptionAttestation, Metadata } from '@/api/types';
 import { ChildProcess } from 'child_process';
 
 /**
@@ -31,4 +31,8 @@ export interface TrackedSession {
   activityReportedAt?: number;
   /** Protocol reported by this exact child through its startup webhook. */
   terminalProtocol?: 1;
+  /** Encryption reported by this exact child through its startup webhook. */
+  sessionEncryption?: AgentPlaneSessionEncryptionAttestation;
+  /** OS process-incarnation identity; unlike PID, this is not reused. */
+  processBirthFingerprint?: string;
 }

@@ -27,8 +27,10 @@ vi.mock('@/ui/logger', () => ({
 vi.mock('./encryption', () => ({
     decodeBase64: vi.fn((data: string) => data),
     encodeBase64: vi.fn((data: any) => data),
-    decrypt: vi.fn((data: any) => data),
-    encrypt: vi.fn((data: any) => data)
+    decrypt: vi.fn((_key: any, _variant: any, data: any) => data),
+    encrypt: vi.fn((_key: any, _variant: any, data: any) => data),
+    getRandomBytes: vi.fn(() => new Uint8Array(32)),
+    libsodiumEncryptForPublicKey: vi.fn(() => new Uint8Array(32)),
 }));
 
 // Mock configuration
@@ -82,6 +84,42 @@ describe('Api server error handling', () => {
     });
 
     describe('getOrCreateSession', () => {
+        it('attests legacy session encryption from the actual credential branch', async () => {
+            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            const metadata = { ...testMetadata };
+            mockPost.mockRejectedValue({ code: 'ECONNREFUSED' });
+
+            await api.getOrCreateSession({ tag: 'legacy-tag', metadata, state: null });
+
+            expect(metadata).toHaveProperty('sessionEncryption', {
+                credentialMode: 'legacy',
+                sessionMode: 'legacy',
+            });
+            consoleSpy.mockRestore();
+        });
+
+        it('attests data-key session encryption from the actual credential branch', async () => {
+            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+            const dataKeyApi = await ApiClient.create({
+                token: 'fake-token',
+                encryption: {
+                    type: 'dataKey',
+                    publicKey: new Uint8Array(32),
+                    machineKey: new Uint8Array(32),
+                },
+            });
+            const metadata = { ...testMetadata };
+            mockPost.mockRejectedValue({ code: 'ECONNREFUSED' });
+
+            await dataKeyApi.getOrCreateSession({ tag: 'data-key-tag', metadata, state: null });
+
+            expect(metadata).toHaveProperty('sessionEncryption', {
+                credentialMode: 'data_key',
+                sessionMode: 'data_key',
+            });
+            consoleSpy.mockRestore();
+        });
+
         it('should return null when Happy server is unreachable (ECONNREFUSED)', async () => {
             const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 

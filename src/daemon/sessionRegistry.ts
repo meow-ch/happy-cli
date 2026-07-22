@@ -1,7 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { configuration } from '@/configuration';
-import { Metadata } from '@/api/types';
+import {
+  isAgentPlaneSessionEncryptionAttestation,
+  type AgentPlaneSessionEncryptionAttestation,
+  type Metadata,
+} from '@/api/types';
 
 export type DaemonSessionStatus =
   | 'tracked_alive'
@@ -23,6 +27,8 @@ export interface PersistedDaemonSession {
   pendingOutbox?: number;
   activityReportedAt?: number;
   terminalProtocol?: 1;
+  sessionEncryption?: AgentPlaneSessionEncryptionAttestation;
+  processBirthFingerprint?: string;
 }
 
 interface PersistedDaemonSessionRegistry {
@@ -66,6 +72,14 @@ function normalizeSession(value: unknown): PersistedDaemonSession | null {
     session.activityReportedAt = value.activityReportedAt;
   }
   if (value.terminalProtocol === 1) session.terminalProtocol = 1;
+  if (isAgentPlaneSessionEncryptionAttestation(value.sessionEncryption)) {
+    session.sessionEncryption = value.sessionEncryption;
+  }
+  if (typeof value.processBirthFingerprint === 'string'
+    && value.processBirthFingerprint.length > 0
+    && value.processBirthFingerprint.length <= 256) {
+    session.processBirthFingerprint = value.processBirthFingerprint;
+  }
   return session;
 }
 
@@ -106,6 +120,7 @@ export function upsertDaemonSessionRecord(
     pid: number;
     startedBy?: string;
     metadata?: Metadata;
+    processBirthFingerprint?: string;
   },
   registryPath = defaultDaemonSessionRegistryPath(),
 ): PersistedDaemonSession {
@@ -130,6 +145,18 @@ export function upsertDaemonSessionRecord(
   const terminalProtocol = input.metadata?.terminalProtocol
     ?? (sameProcess ? existing?.terminalProtocol : undefined);
   if (terminalProtocol === 1) next.terminalProtocol = 1;
+  const sessionEncryption = input.metadata?.sessionEncryption
+    ?? (sameProcess ? existing?.sessionEncryption : undefined);
+  if (isAgentPlaneSessionEncryptionAttestation(sessionEncryption)) {
+    next.sessionEncryption = sessionEncryption;
+  }
+  const processBirthFingerprint = input.processBirthFingerprint
+    ?? (sameProcess ? existing?.processBirthFingerprint : undefined);
+  if (typeof processBirthFingerprint === 'string'
+    && processBirthFingerprint.length > 0
+    && processBirthFingerprint.length <= 256) {
+    next.processBirthFingerprint = processBirthFingerprint;
+  }
   const path = input.metadata?.path ?? existing?.path;
   const flavor = input.metadata?.flavor ?? existing?.flavor;
   if (path) next.path = path;
